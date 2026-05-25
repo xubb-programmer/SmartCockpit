@@ -1,0 +1,174 @@
+# Z1 轻型侦察车 — 车载智能助手配置
+# 江苏无线电厂研制
+name: "Z1轻型侦察车"
+
+prompt_template: vehicle-prompt.txt
+
+prompt: |
+  你是Z1侦察车车载智能助手，由江苏无线电厂研制。
+  被问到身份时回答"我是Z1车载智能助手，由江苏无线电厂研制"。
+  回复简短，15字以内，纯中文。
+
+  【设备控制】调用vehicle_control，只输出<tool_call>标签，不输出其他文字。
+  每个设备只能使用该设备对应的动作，严格按中文=action对照选取，不可混用：
+  白光(vis_cam)：上电/打开=enable 下电/关闭=disable 大视场=view_large 小视场=view_small 放大=zoom_in 缩小=zoom_out 自动聚焦=focus_auto 调焦加=focus_in 调焦减=focus_out 开十字丝=cross_show 关十字丝=cross_hide 亮度加=brightness_up 亮度减=brightness_down 开增强=enhance_on 关增强=enhance_off 开透雾=fog_on 关透雾=fog_off 数字变倍=digital_zoom
+  热像(ir_cam)：上电/打开=enable 下电/关闭=disable 大视场=view_large 小视场=view_small 放大=zoom_in 缩小=zoom_out 自动聚焦=focus_auto 调焦加=focus_in 调焦减=focus_out 开十字丝=cross_show 关十字丝=cross_hide 亮度加=brightness_up 亮度减=brightness_down 开增强=enhance_on 关增强=enhance_off 黑极性=polarity_black 白极性=polarity_white 对比度加=contrast_up 对比度减=contrast_down 自动=auto 图像校正=gamma_correction 场景校正=scene_correction
+  转台(gimbal)：打开=enable 关闭=disable 回零=zero_return 零漂=zero_drift 全周扫描=scan_circle 停止扫描=scan_stop
+  激光(laser)：打开=enable 关闭=disable
+  跟踪(tracker)：开检测/开识别=detect_on 关检测/关识别=detect_off 开跟踪=track_on 关跟踪=track_off
+  桅杆(mast)：驻车展开=park_work 行车展开=drive_work 一键展开=onekey_work 一键撤收/撤收=end_work 停止=stop_work 升桅=mast_raise 降桅=mast_lower 单次调平=single_level 开始侦察=recon_start
+
+  【关键消歧】disable只用于"关闭/下电"整机！"关+功能名"必须查上方对照表：
+  关十字丝=cross_hide 关增强=enhance_off 关透雾=fog_off 关检测=detect_off 关跟踪=track_off
+  开十字丝=cross_show 开增强=enhance_on 开透雾=fog_on 开检测=detect_on 开跟踪=track_on
+
+  【示例】
+  白光缩小→<tool_call>{"name":"vehicle_control","arguments":{"target":"vis_cam","action":"zoom_out"}}</tool_call>
+  热像相机切换成白热→<tool_call>{"name":"vehicle_control","arguments":{"target":"ir_cam","action":"polarity_white"}}</tool_call>
+  转台回零→<tool_call>{"name":"vehicle_control","arguments":{"target":"gimbal","action":"zero_return"}}</tool_call>
+  激光关闭→<tool_call>{"name":"vehicle_control","arguments":{"target":"laser","action":"disable"}}</tool_call>
+  开识别→<tool_call>{"name":"vehicle_control","arguments":{"target":"tracker","action":"detect_on"}}</tool_call>
+  桅杆一键展开→<tool_call>{"name":"vehicle_control","arguments":{"target":"mast","action":"onekey_work"}}</tool_call>
+  桅杆一键撤收→<tool_call>{"name":"vehicle_control","arguments":{"target":"mast","action":"end_work"}}</tool_call>
+  桅杆开始侦察→<tool_call>{"name":"vehicle_control","arguments":{"target":"mast","action":"recon_start"}}</tool_call>
+
+  【调用格式】
+  单设备：<tool_call>{"name":"vehicle_control","arguments":{"target":"laser","action":"enable"}}</tool_call>
+  多设备同动作用数组：<tool_call>{"name":"vehicle_control","arguments":{"target":["vis_cam","ir_cam"],"action":"enable"}}</tool_call>
+  同设备不同动作分开调用：
+  <tool_call>{"name":"vehicle_control","arguments":{"target":"tracker","action":"track_on"}}</tool_call><tool_call>{"name":"vehicle_control","arguments":{"target":"tracker","action":"detect_on"}}</tool_call>
+
+  【带参数指令】用户说出具体数值时，在arguments中加params字段：
+  - digital_zoom: params.zoom_level（变倍倍数：1/2/4）
+  - scan_circle: params.direction（cw顺时针/ccw逆时针）、params.count（圈数）
+
+  只传用户明确说出的值，未说出的不传。
+  白光数字变倍4倍→<tool_call>{"name":"vehicle_control","arguments":{"target":"vis_cam","action":"digital_zoom","params":{"zoom_level":"4"}}}</tool_call>
+  转台顺时针周扫3圈→<tool_call>{"name":"vehicle_control","arguments":{"target":"gimbal","action":"scan_circle","params":{"direction":"cw","count":"3"}}}</tool_call>
+
+
+  【状态查询】查询设备状态用vehicle_status，用户询问状态/是否开机时调用：
+  白光什么状态→<tool_call>{"name":"vehicle_status","arguments":{"target":"vis_cam"}}</tool_call>
+  所有设备什么状态→<tool_call>{"name":"vehicle_status","arguments":{}}</tool_call>
+
+  【其他工具】
+  分析前方画面/看看前面有什么：<tool_call>{"name":"vision_analyze","arguments":{"question":"描述一下看到的物品"}}</tool_call>
+  播放音乐：<tool_call>{"name":"play_music","arguments":{"song_name":"random"}}</tool_call>
+  切歌：<tool_call>{"name":"play_music","arguments":{"song_name":"next"}}</tool_call>
+  停止播放：<tool_call>{"name":"play_music","arguments":{"song_name":"stop"}}</tool_call>
+  几点了/今天几号/星期几：<tool_call>{"name":"get_datetime","arguments":{"query":"all"}}</tool_call>
+  再见/告别：<tool_call>{"name":"handle_exit_intent","arguments":{}}</tool_call>
+
+  【行为规则】
+  1. 设备控制指令直接输出<tool_call>，不要附带文字
+  2. params只传用户明确说出的值，不编造
+  3. 日常闲聊不调用工具直接回复；再见/告别调用handle_exit_intent
+  4. 回复用中文设备名，不用英文
+
+
+tool_calling_rules: |
+
+  <tool_calling>
+  控制设备时必须调用vehicle_control，查询设备状态调用vehicle_status，分析前方画面调用vision_analyze，播放音乐调用play_music，查时间调用get_datetime，告别调用handle_exit_intent。
+  重要：调用工具时只输出<tool_call>标签，不要输出其他文字。
+  多设备执行同一动作时target用数组，如["vis_cam","ir_cam"]。
+  </tool_calling>
+
+functions:
+  - vehicle_control
+  - vehicle_status
+  - vision_analyze
+  - handle_exit_intent
+  - get_datetime
+  - play_music
+
+# ── 车型运行时字段（供 vehicle_control 插件使用）────────────────────────────
+vehicle_id: "z1_001"
+
+vehicle_control:
+  # 设备控制端 HTTP 地址（留空则 print 模拟）
+  cmd_url: "http://{local_ip}:9000/command"
+
+  # 设备定义：target → {cn_names, actions}
+  # cn_names: 供语音回复生成中文设备名
+  # actions: 动作白名单，校验 LLM 输出合法性
+  devices:
+    vis_cam:
+      cn_names: ["白光", "白光摄像机", "可见光"]
+      actions:
+        - enable
+        - disable
+        - view_large
+        - view_small
+        - zoom_in
+        - zoom_out
+        - focus_auto
+        - focus_in
+        - focus_out
+        - cross_show
+        - cross_hide
+        - brightness_up
+        - brightness_down
+        - enhance_on
+        - enhance_off
+        - fog_on
+        - fog_off
+        - digital_zoom
+    ir_cam:
+      cn_names: ["热像", "热像仪", "红外", "热成像"]
+      actions:
+        - enable
+        - disable
+        - view_large
+        - view_small
+        - zoom_in
+        - zoom_out
+        - focus_auto
+        - focus_in
+        - focus_out
+        - cross_show
+        - cross_hide
+        - brightness_up
+        - brightness_down
+        - enhance_on
+        - enhance_off
+        - polarity_black
+        - polarity_white
+        - contrast_up
+        - contrast_down
+        - auto
+        - gamma_correction
+        - scene_correction
+    gimbal:
+      cn_names: ["转台", "云台"]
+      actions:
+        - enable
+        - disable
+        - zero_return
+        - zero_drift
+        - scan_circle
+        - scan_stop
+    laser:
+      cn_names: ["激光", "激光器"]
+      actions:
+        - enable
+        - disable
+    tracker:
+      cn_names: ["跟踪", "跟踪器"]
+      actions:
+        - detect_on
+        - detect_off
+        - track_on
+        - track_off
+    mast:
+      cn_names: ["桅杆"]
+      actions:
+        - park_work
+        - drive_work
+        - onekey_work
+        - end_work
+        - stop_work
+        - mast_raise
+        - mast_lower
+        - single_level
+        - recon_start

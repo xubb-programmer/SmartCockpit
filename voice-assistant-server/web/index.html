@@ -1,0 +1,551 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>智能控制中心</title>
+    <link rel="stylesheet" href="css/style.css?v=0205">
+    <script>
+        // 检测是否使用file://协议打开
+        if (window.location.protocol === 'file:') {
+            document.addEventListener('DOMContentLoaded', function () {
+                // 创建背景模糊遮罩
+                const overlayDiv = document.createElement('div');
+                overlayDiv.className = 'file-protocol-overlay';
+                document.body.appendChild(overlayDiv);
+
+                // 创建警告框
+                const warningDiv = document.createElement('div');
+                warningDiv.id = 'fileProtocolWarning';
+                warningDiv.innerHTML = `
+                    <h2>⚠️ 警告：请使用HTTP服务器打开此页面</h2>
+                    <p>您当前使用的是本地文件方式打开页面（file://协议），这可能导致页面功能异常。</p>
+                    <p>您可以使用nginx映射启动页面，也可以按照以下步骤使用python启动HTTP服务：</p>
+                    <ol>
+                        <li>打开命令行终端</li>
+                        <li>命令行进入到 voice-assistant-server/web 目录</li>
+                        <li>执行以下命令启动HTTP服务器：</li>
+                    </ol>
+                    <pre>python -m http.server 18006</pre>
+                    <p>然后在浏览器中访问：<strong>http://localhost:18006/</strong></p>
+                `;
+                document.body.appendChild(warningDiv);
+            });
+        }
+    </script>
+</head>
+
+<body>
+    <!-- 背景容器 -->
+    <div class="background-container" id="backgroundContainer">
+        <div class="background-overlay"></div>
+    </div>
+
+    <!-- 主容器 -->
+    <div class="container">
+
+
+
+        <!-- 连接状态指示器 - 页面顶部中部 -->
+        <div class="connection-status-top">
+            <div class="status-indicator">
+                <span class="status-dot status-disconnected"></span>
+                <span id="connectionStatus">离线</span>
+            </div>
+        </div>
+
+        <!-- 模型加载提示 -->
+        <div class="model-container">
+            <div class="model-loading" id="modelLoading">
+                <div class="loading-char-float">
+                    <div class="main-char">
+                        <span>模</span><span>型</span><span>加</span><span>载</span><span>中</span><span>✨</span>
+                    </div>
+                    <div class="shadow-char">模型加载中✨</div>
+                </div>
+            </div>
+        </div>
+
+
+
+        <!-- 聊天消息流（弹幕样式） -->
+        <div class="chat-container">
+            <div class="chat-stream" id="chatStream">
+                <!-- 聊天消息将动态插入这里 -->
+            </div>
+            <div class="chat-ipt" id="chatIpt">
+                <input type="text" id="messageInput" autocomplete="off" placeholder="输入消息，按Enter发送">
+            </div>
+        </div>
+
+        <!-- 底部控制栏 -->
+        <div class="control-bar">
+            <button class="control-btn" id="settingsBtn" title="设置">
+                <svg class="btn-icon" viewBox="0 0 24 24" fill="currentColor">
+                    <path
+                        d="M12 15.5A3.5 3.5 0 0 1 8.5 12A3.5 3.5 0 0 1 12 8.5A3.5 3.5 0 0 1 15.5 12A3.5 3.5 0 0 1 12 15.5M19.43 12.97C19.47 12.65 19.5 12.33 19.5 12C19.5 11.67 19.47 11.34 19.43 11L21.54 9.37C21.73 9.22 21.78 8.95 21.66 8.73L19.66 5.27C19.54 5.05 19.27 4.96 19.05 5.05L16.56 6.05C16.04 5.66 15.5 5.32 14.87 5.07L14.5 2.42C14.46 2.18 14.25 2 14 2H10C9.75 2 9.54 2.18 9.5 2.42L9.13 5.07C8.5 5.32 7.96 5.66 7.44 6.05L4.95 5.05C4.73 4.96 4.46 5.05 4.34 5.27L2.34 8.73C2.22 8.95 2.27 9.22 2.46 9.37L4.57 11C4.53 11.34 4.5 11.67 4.5 12C4.5 12.33 4.53 12.65 4.57 12.97L2.46 14.63C2.27 14.78 2.22 15.05 2.34 15.27L4.34 18.73C4.46 18.95 4.73 19.03 4.95 18.95L7.44 17.94C7.96 18.34 8.5 18.68 9.13 18.93L9.5 21.58C9.54 21.82 9.75 22 10 22H14C14.25 22 14.46 21.82 14.5 21.58L14.87 18.93C15.5 18.68 16.04 18.34 16.56 17.94L19.05 18.95C19.27 19.03 19.54 18.95 19.66 18.73L21.66 15.27C21.78 15.05 21.73 14.78 21.54 14.63L19.43 12.97Z" />
+                </svg>
+                <span class="btn-text">设置</span>
+            </button>
+
+            <button class="control-btn" id="helpBtn" title="语音指令帮助">
+                <svg class="btn-icon" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M11,18H13V16H11V18M12,2A10,10 0 0,0 2,12A10,10 0 0,0 12,22A10,10 0 0,0 22,12A10,10 0 0,0 12,2M12,20C7.59,20 4,16.41 4,12C4,7.59 7.59,4 12,4C16.41,4 20,7.59 20,12C20,16.41 16.41,20 12,20M12,6A4,4 0 0,0 8,10H10A2,2 0 0,1 12,8A2,2 0 0,1 14,10C14,12 11,11.75 11,15H13C13,12.75 16,12.5 16,10A4,4 0 0,0 12,6Z" />
+                </svg>
+                <span class="btn-text">帮助</span>
+            </button>
+
+
+
+            <button class="control-btn dial-btn" id="dialBtn" title="拨号">
+                <svg class="btn-icon" viewBox="0 0 24 24" fill="currentColor">
+                    <path
+                        d="M6.62,10.79C8.06,13.62 10.38,15.94 13.21,17.38L15.41,15.18C15.69,14.9 16.08,14.82 16.43,14.93C17.55,15.3 18.75,15.5 20,15.5A1,1 0 0,1 21,16.5V20A1,1 0 0,1 20,21A17,17 0 0,1 3,4A1,1 0 0,1 4,3H7.5A1,1 0 0,1 8.5,4C8.5,5.25 8.7,6.45 9.07,7.57C9.18,7.92 9.1,8.31 8.82,8.59L6.62,10.79Z" />
+                </svg>
+                <span class="btn-text">拨号</span>
+            </button>
+
+            <button class="control-btn" id="recordBtn" title="开始录音" disabled>
+                <svg class="btn-icon" viewBox="0 0 24 24" fill="currentColor">
+                    <path
+                        d="M12,2A3,3 0 0,1 15,5V11A3,3 0 0,1 12,14A3,3 0 0,1 9,11V5A3,3 0 0,1 12,2M19,11C19,14.53 16.39,17.44 13,17.93V21H11V17.93C7.61,17.44 5,14.53 5,11H7A5,5 0 0,0 12,16A5,5 0 0,0 17,11H19Z" />
+                </svg>
+                <span class="btn-text">录音</span>
+            </button>
+        </div>
+    </div>
+
+    <!-- 设置弹窗 -->
+    <div class="modal" id="settingsModal">
+        <div class="modal-content settings-modal">
+            <div class="modal-header">
+                <h2>设置</h2>
+                <button class="close-btn" id="closeSettingsBtn">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="settings-tabs">
+                    <button class="tab-btn active" data-tab="device">设备配置</button>
+                    <button class="tab-btn" data-tab="mcp">MCP工具</button>
+                    <button class="tab-btn" data-tab="other">其他设置</button>
+                </div>
+
+                <div class="tab-content active" id="deviceTab">
+                    <!-- 设备配置面板 -->
+                    <div class="config-panel">
+                        <div class="control-panel">
+                            <div class="config-row">
+                                <div class="config-item">
+                                    <label for="deviceMac">设备MAC:</label>
+                                    <input type="text" id="deviceMac" placeholder="device-id">
+                                </div>
+                            </div>
+                            <div class="config-row">
+                                <div class="config-item">
+                                    <label for="clientId">客户端ID:</label>
+                                    <input type="text" id="clientId" value="web_client" placeholder="client-id">
+                                </div>
+                                <div class="config-item">
+                                    <label for="deviceName">设备名称:</label>
+                                    <input type="text" id="deviceName" value="Web客户端" maxlength="50"
+                                        placeholder="deviceName">
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- 连接信息面板 -->
+                    <div class="connection-controls">
+                        <div class="input-group">
+                            <label for="otaUrl">OTA服务器地址:</label>
+                            <input type="text" id="otaUrl" value="http://127.0.0.1:18003/voice_assistant/ota/"
+                                placeholder="OTA服务器地址，如：http://127.0.0.1:18003/voice_assistant/ota/" />
+                        </div>
+                        <div class="input-group">
+                            <label for="serverUrl">WebSocket服务器地址:</label>
+                            <input type="text" id="serverUrl" value="" readonly disabled
+                                placeholder="填写OTA地址后，点击拨号按钮自动连接" />
+                        </div>
+                        <div class="input-group">
+                            <label for="visionUrl">视觉分析地址:</label>
+                            <input type="text" id="visionUrl" value="" readonly disabled placeholder="成功建立ws连接后自动获取" />
+                        </div>
+                        <div class="input-group">
+                            <label for="vehicleProfileSelect">车型选择:</label>
+                            <div style="display:flex;gap:8px;align-items:center;">
+                                <select id="vehicleProfileSelect" class="model-select" style="flex:1;">
+                                    <option value="">-- 加载中... --</option>
+                                </select>
+                                <button id="switchVehicleBtn" class="btn-primary" style="white-space:nowrap;padding:6px 14px;">切换</button>
+                            </div>
+                            <div id="vehicleSwitchMsg" style="margin-top:4px;font-size:12px;color:#aaa;"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="tab-content" id="mcpTab">
+                    <!-- MCP 工具管理区域 -->
+                    <div class="mcp-tools-container">
+                        <div class="mcp-tools-header">
+                            <h3>MCP 工具管理</h3>
+                        </div>
+                        <div class="mcp-tools-panel" id="mcpToolsPanel">
+                            <div class="mcp-tools-list" id="mcpToolsContainer">
+                                <!-- 工具列表将动态插入这里 -->
+                            </div>
+                            <div class="mcp-actions">
+                                <button class="btn-primary" id="addMcpToolBtn">
+                                    ➕ 添加新工具
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="tab-content" id="otherTab">
+                    <div class="other-settings-panel">
+                        <div class="control-panel">
+                            <div class="config-row">
+                                <div class="config-item">
+                                    <label>外观设置:</label>
+                                </div>
+                            </div>
+                            <div class="config-row">
+                                <div class="config-item">
+                                    <label></label>
+                                    <button class="background-btn" id="backgroundBtn" title="切换背景">
+                                        <svg class="btn-icon" viewBox="0 0 24 24" fill="currentColor">
+                                            <path
+                                                d="M12,18A6,6 0 0,1 6,12C6,11 6.25,10.03 6.7,9.2L5.24,7.74C4.46,8.97 4,10.43 4,12A8,8 0 0,0 12,20V23L16,19L12,15V18M12,4V1L8,5L12,9V6A6,6 0 0,1 18,12C18,13 17.75,13.97 17.3,14.8L18.76,16.26C19.54,15.03 20,13.57 20,12A8,8 0 0,0 12,4Z" />
+                                        </svg>
+                                        <span class="btn-text">切换背景</span>
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- MCP 工具编辑模态框 -->
+    <div id="mcpToolModal" class="modal">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h2 id="mcpModalTitle">添加工具</h2>
+                <button class="close-btn" id="closeMcpModalBtn">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div id="mcpErrorContainer"></div>
+                <form id="mcpToolForm">
+                    <div class="input-group">
+                        <label for="mcpToolName">工具名称 *</label>
+                        <input type="text" id="mcpToolName" placeholder="例如: self.get_device_status" required>
+                    </div>
+                    <div class="input-group">
+                        <label for="mcpToolDescription">工具描述 *</label>
+                        <textarea id="mcpToolDescription" placeholder="详细描述工具的功能和使用场景..." required></textarea>
+                    </div>
+                    <div class="input-group">
+                        <div class="input-group-header">
+                            <label>输入参数</label>
+                            <button type="button" class="properties-btn-primary" id="addMcpPropertyBtn">
+                                ➕ 添加参数
+                            </button>
+                        </div>
+                        <div class="properties-container">
+                            <div class="mcp-empty-state" id="mcpEmptyState">
+                                暂无参数，点击上方按钮添加参数
+                            </div>
+                            <div class="mcp-properties-list" id="mcpPropertiesContainer">
+                            </div>
+                        </div>
+                    </div>
+                    <div class="input-group">
+                        <label for="mcpMockResponse">
+                            模拟返回结果 (JSON 格式，可选)
+                            <span style="font-size: 12px; color: #999; font-weight: normal;">- 留空则返回默认成功消息</span>
+                        </label>
+                        <textarea id="mcpMockResponse" placeholder='{"success": true, "data": "执行成功"}'></textarea>
+                    </div>
+                    <div class="modal-actions">
+                        <button type="button" class="btn-secondary" id="cancelMcpBtn">取消</button>
+                        <button type="submit" class="btn-primary">保存</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- 参数编辑模态框 -->
+    <div id="mcpPropertyModal" class="modal">
+        <div class="modal-content property-modal">
+            <div class="modal-header">
+                <h2 id="mcpPropertyModalTitle">编辑参数</h2>
+                <button class="close-btn" id="closeMcpPropertyModalBtn">&times;</button>
+            </div>
+            <div class="modal-body">
+                <form id="mcpPropertyForm">
+                    <input type="hidden" id="mcpPropertyIndex" value="-1">
+                    <div class="input-group">
+                        <label for="mcpPropertyName">参数名称 *</label>
+                        <input type="text" id="mcpPropertyName" placeholder="例如: param_1" required>
+                    </div>
+                    <div class="input-group">
+                        <label for="mcpPropertyType">数据类型 *</label>
+                        <select id="mcpPropertyType" class="model-select" required>
+                            <option value="string">字符串</option>
+                            <option value="integer">整数</option>
+                            <option value="number">数字</option>
+                            <option value="boolean">布尔值</option>
+                            <option value="array">数组</option>
+                            <option value="object">对象</option>
+                        </select>
+                    </div>
+                    <div class="input-group" id="mcpPropertyRangeGroup" style="display: none;">
+                        <div class="config-row">
+                            <div class="config-item">
+                                <label for="mcpPropertyMinimum">最小值</label>
+                                <input type="number" id="mcpPropertyMinimum" placeholder="可选">
+                            </div>
+                            <div class="config-item">
+                                <label for="mcpPropertyMaximum">最大值</label>
+                                <input type="number" id="mcpPropertyMaximum" placeholder="可选">
+                            </div>
+                        </div>
+                    </div>
+                    <div class="input-group">
+                        <label for="mcpPropertyDescription">参数描述</label>
+                        <input type="text" id="mcpPropertyDescription" placeholder="可选">
+                    </div>
+                    <div class="input-group">
+                        <label class="mcp-checkbox-label">
+                            <input type="checkbox" id="mcpPropertyRequired">
+                            必填参数
+                        </label>
+                    </div>
+                    <div class="modal-actions">
+                        <button type="button" class="btn-secondary" id="cancelMcpPropertyBtn">取消</button>
+                        <button type="submit" class="btn-primary">保存</button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+
+    <!-- 背景加载 -->
+    <script src="js/ui/background-load.js?v=0205"></script>
+
+
+
+    <!-- Opus解码库 -->
+    <script src="js/utils/libopus.js?v=0205"></script>
+
+    <!-- 主应用入口 -->
+    <script type="module" src="js/app.js?v=0419"></script>
+
+    <!-- 全局错误处理 -->
+    <script>
+        // 添加全局错误处理
+        window.addEventListener('error', function (event) {
+            console.error('全局错误:', event.error);
+        });
+
+        // 添加未处理的Promise拒绝处理
+        window.addEventListener('unhandledrejection', function (event) {
+            console.error('未处理的Promise拒绝:', event.reason);
+        });
+    </script>
+
+    <script>
+    // ── 车型选择器 ──────────────────────────────────────────────────
+    (function () {
+        function getApiBase() {
+            const ota = document.getElementById('otaUrl')?.value || '';
+            // 从 OTA 地址推断 API 地址：http://host:port/...  → http://host:port
+            try { return new URL(ota).origin; } catch (e) { return ''; }
+        }
+
+        async function loadProfiles() {
+            const base = getApiBase();
+            if (!base) return;
+            const sel = document.getElementById('vehicleProfileSelect');
+            const msg = document.getElementById('vehicleSwitchMsg');
+            try {
+                const res = await fetch(`${base}/voice_assistant/vehicle/profiles`);
+                const data = await res.json();
+                sel.innerHTML = '';
+                (data.profiles || []).forEach(p => {
+                    const opt = document.createElement('option');
+                    opt.value = p.id;
+                    opt.textContent = p.name + (p.active ? ' ✓' : '');
+                    opt.selected = p.active;
+                    sel.appendChild(opt);
+                });
+                if (msg) msg.textContent = `当前: ${data.current || '未设置'}`;
+            } catch (e) {
+                if (sel) sel.innerHTML = '<option value="">-- 无法连接服务器 --</option>';
+            }
+        }
+
+        async function switchProfile() {
+            const base = getApiBase();
+            const sel = document.getElementById('vehicleProfileSelect');
+            const msg = document.getElementById('vehicleSwitchMsg');
+            const profileId = sel?.value;
+            if (!base || !profileId) return;
+
+            msg.textContent = '切换中...';
+            msg.style.color = '#aaa';
+            try {
+                const res = await fetch(`${base}/voice_assistant/vehicle/switch`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ profile_id: profileId }),
+                });
+                const data = await res.json();
+                if (data.success) {
+                    msg.textContent = `✅ 已切换为 ${profileId}，下次连接生效`;
+                    msg.style.color = '#4caf50';
+                    await loadProfiles(); // 刷新列表
+                } else {
+                    msg.textContent = `❌ 切换失败: ${data.error || '未知错误'}`;
+                    msg.style.color = '#f44336';
+                }
+            } catch (e) {
+                msg.textContent = `❌ 请求失败: ${e.message}`;
+                msg.style.color = '#f44336';
+            }
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            // 打开设置弹窗时加载车型列表
+            document.getElementById('settingsBtn')?.addEventListener('click', () => {
+                setTimeout(loadProfiles, 200); // 等弹窗动画完成
+            });
+            // 切换按钮
+            document.getElementById('switchVehicleBtn')?.addEventListener('click', switchProfile);
+        });
+    })();
+    </script>
+
+    <!-- 帮助弹窗 -->
+    <div class="modal" id="helpModal">
+        <div class="modal-content help-modal">
+            <div class="modal-header">
+                <h2 id="helpModalTitle">语音指令帮助</h2>
+                <button class="close-btn" id="closeHelpBtn">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div id="helpCommandsContainer" class="help-commands-container">
+                    <div class="help-loading">加载中...</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+    // ── 帮助弹窗 ──────────────────────────────────────────────────
+    (function () {
+        function getApiBase() {
+            const ota = document.getElementById('otaUrl')?.value || '';
+            try { return new URL(ota).origin; } catch (e) { return ''; }
+        }
+
+        async function loadCommands() {
+            const base = getApiBase();
+            const container = document.getElementById('helpCommandsContainer');
+            if (!base) {
+                container.innerHTML = '<div class="help-empty">请先配置 OTA 服务器地址</div>';
+                return;
+            }
+            container.innerHTML = '<div class="help-loading">加载中...</div>';
+
+            try {
+                const res = await fetch(`${base}/voice_assistant/vehicle/commands`);
+                const data = await res.json();
+                if (data.error) {
+                    container.innerHTML = `<div class="help-empty">❌ ${data.error}</div>`;
+                    return;
+                }
+
+                // 更新标题
+                const title = document.getElementById('helpModalTitle');
+                if (title) title.textContent = `${data.vehicle_name} · 语音指令`;
+
+                // 渲染指令列表
+                let html = '';
+                (data.commands || []).forEach(group => {
+                    html += `<div class="help-category">`;
+                    html += `<div class="help-category-header">${group.icon} ${group.category}</div>`;
+                    html += `<div class="help-cmd-grid">`;
+                    (group.items || []).forEach(item => {
+                        const escaped = item.text.replace(/"/g, '&quot;');
+                        html += `<button class="help-cmd-btn" data-cmd="${escaped}" title="${item.description}">`;
+                        html += `<span class="help-cmd-text">${item.text}</span>`;
+                        html += `<span class="help-cmd-desc">${item.description}</span>`;
+                        html += `</button>`;
+                    });
+                    html += `</div></div>`;
+                });
+                container.innerHTML = html;
+
+                // 绑定点击事件
+                container.querySelectorAll('.help-cmd-btn').forEach(btn => {
+                    btn.addEventListener('click', () => {
+                        const cmd = btn.getAttribute('data-cmd');
+                        sendCommand(cmd);
+                    });
+                });
+            } catch (e) {
+                container.innerHTML = `<div class="help-empty">❌ 无法连接服务器</div>`;
+            }
+        }
+
+        function sendCommand(text) {
+            // 使用 WebSocket 发送文本消息（模拟语音输入）
+            const { getWebSocketHandler } = window._helpModules || {};
+            if (getWebSocketHandler) {
+                const ws = getWebSocketHandler();
+                if (ws && ws.isConnected()) {
+                    ws.sendTextMessage(text);
+                    // 关闭弹窗
+                    document.getElementById('helpModal').style.display = 'none';
+                    return;
+                }
+            }
+            // 降级：写入聊天输入框
+            const input = document.getElementById('messageInput');
+            if (input) {
+                input.value = text;
+                input.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter' }));
+            }
+            document.getElementById('helpModal').style.display = 'none';
+        }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            const helpBtn = document.getElementById('helpBtn');
+            const helpModal = document.getElementById('helpModal');
+            const closeBtn = document.getElementById('closeHelpBtn');
+
+            helpBtn?.addEventListener('click', () => {
+                helpModal.style.display = 'flex';
+                loadCommands();
+            });
+            closeBtn?.addEventListener('click', () => {
+                helpModal.style.display = 'none';
+            });
+            helpModal?.addEventListener('click', (e) => {
+                if (e.target === helpModal) helpModal.style.display = 'none';
+            });
+        });
+
+        // 暴露模块注入接口
+        window._helpModules = window._helpModules || {};
+    })();
+    </script>
+
+</body>
+
+</html>

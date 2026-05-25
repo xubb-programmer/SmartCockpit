@@ -1,0 +1,160 @@
+import base64
+import tempfile
+import os
+from config.logger import setup_logging
+from plugins_func.register import register_function, ToolType, Action, ActionResponse
+from core.utils.vllm import create_instance
+
+TAG = __name__
+logger = setup_logging()
+
+# 阿拉伯数字 → 中文映射（Sherpa TTS 不支持数字朗读）
+_DIGIT_MAP = str.maketrans("0123456789", "零一二三四五六七八九")
+
+def _convert_digits_for_tts(text):
+    """将文本中的阿拉伯数字转为中文数字，方便 TTS 朗读"""
+    import re
+    # 处理常见数字+单位：50米→五十米，200米→二百米
+    def _num_to_cn(match):
+        n = int(match.group(0))
+        if n == 0: return "零"
+        
+        def _convert_segment(num):
+            units = ["", "十", "百", "千"]
+            result = ""
+            s = str(num)
+            for i, c in enumerate(s):
+                d = int(c)
+                pos = len(s) - 1 - i
+                if d == 0:
+                    if result and not result.endswith("零"):
+                        result += "零"
+                else:
+                    if d == 1 and pos == 1 and i == 0:
+                        result += "十"  # 10→十, 15→十五
+                    else:
+                        result += "零一二三四五六七八九"[d] + (units[pos] if pos < len(units) else "")
+            return result.rstrip("零")
+        
+        if n < 10000:
+            return _convert_segment(n)
+        else:
+            w = n // 10000
+            rem = n % 10000
+            res = _convert_segment(w) + "万"
+            if rem > 0:
+                if rem < 1000:
+                    res += "零"
+                res += _convert_segment(rem)
+            return res
+    
+    # 先处理连续数字（如 50、200）
+    text = re.sub(r'\d+', _num_to_cn, text)
+    # 清理列表标号格式（如 "一." → ""）
+    text = re.sub(r'^[一二三四五六七八九十]\.\s*', '', text, flags=re.MULTILINE)
+    return text
+
+vision_analyze_desc = {
+    "type": "function",
+    "function": {
+        "name": "vision_analyze",
+        "description": "分析车辆前方画面。当用户说'看看前面有什么'、'描述画面'、'分析图片'等指令时调用。",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "question": {
+                    "type": "string",
+                    "description": "用户对画面提出的具体问题。如果不明确，默认为战场态势分析。"
+                }
+            },
+            "required": ["question"]
+        }
+    }
+}
+
+# 战场态势分析的默认提问词
+DEFAULT_TACTICAL_QUESTION = (
+    "简短报告画面中的人员、车辆、无人机目标，"
+    "包括数量、大致距离、行为态势和威胁等级。"
+    "回复限50字以内，纯中文。"
+)
+
+@register_function("vision_analyze", vision_analyze_desc, ToolType.SYSTEM_CTL)
+def vision_analyze(conn, question=None):
+    """
+    视觉分析插件：
+    从固定路径读取最新截图，调用配置的 VLLM 模块进行分析。
+    """
+    # 如果用户没有提供具体问题，则使用默认的战术分析
+    if not question or question.strip() == "":
+        question = DEFAULT_TACTICAL_QUESTION
+    else:
+        # 使用战术分析角色包装用户的问题
+        question = f"你是侦察车视觉系统。{question}。数字用中文，简短回复。"
+    logger.bind(tag=TAG).info(f"Triggered vision_analyze with question: {question}")
+    
+    # 图片来源优先级：
+    # 1. 配置的 fixed_image_path（摄像头截图的保存路径）
+    # 2. 配置的 test_image_path（无摄像头时的测试图片）
+    # 3. /tmp 下最新的图片文件（兜底）
+    vllm_cfg = conn.config.get("VLLM", {}).get("rknn_vision", {})
+    image_path = vllm_cfg.get("fixed_image_path", os.path.join(tempfile.gettempdir(), "voice_assistant_latest_vision.jpg"))
+    
+    if not os.path.exists(image_path):
+        # 尝试测试图片路径
+        test_path = vllm_cfg.get("test_image_path", os.path.join(tempfile.gettempdir(), "test_vision.png"))
+        if os.path.exists(test_path):
+            image_path = test_path
+            logger.bind(tag=TAG).info(f"使用测试图片: {image_path}")
+        else:
+            # 兜底：扫描 /tmp 下最新的图片
+            import glob
+            _tmp = tempfile.gettempdir()
+            candidates = glob.glob(os.path.join(_tmp, "*.jpg")) + glob.glob(os.path.join(_tmp, "*.png")) + glob.glob(os.path.join(_tmp, "*.jpeg"))
+            if candidates:
+                image_path = max(candidates, key=os.path.getmtime)
+                logger.bind(tag=TAG).info(f"使用最新图片: {image_path}")
+            else:
+                return ActionResponse(
+                    action=Action.RESPONSE, 
+                    result="未找到可分析的图片。", 
+                    response="未找到可分析的图片，请先拍照或放置图片到指定路径。"
+                )
+        
+    try:
+        # [优化] 缓存 VLLM 实例，避免每次调用都重新创建（含 HTTP session 初始化）
+        select_vllm_module = conn.config["selected_module"].get("VLLM")
+        if not select_vllm_module:
+            raise ValueError("未配置视觉分析模块")
+
+        if hasattr(conn, '_vllm_instance') and conn._vllm_instance is not None:
+            vllm = conn._vllm_instance
+            vllm_config = conn.config["VLLM"][select_vllm_module]
+            vllm_type = vllm_config.get("type", select_vllm_module)
+        else:
+            vllm_config = conn.config["VLLM"][select_vllm_module]
+            vllm_type = vllm_config.get("type", select_vllm_module)
+            vllm = create_instance(vllm_type, vllm_config)
+            conn._vllm_instance = vllm
+            logger.bind(tag=TAG).info(f"VLLM 实例已创建并缓存: type={vllm_type}")
+        
+        # [优化] 本地 RKNN 模式：直接传路径，跳过 base64 编码→解码→写盘的冗余链路
+        # OpenAI 等远程模式仍走 base64 兼容路径
+        if vllm_type in ("rknn", "rknn_vision"):
+            result = vllm.response(question, image_path=image_path)
+        else:
+            # 远程 API 需要 base64
+            with open(image_path, "rb") as f:
+                image_data = f.read()
+            image_base64 = base64.b64encode(image_data).decode("utf-8")
+            result = vllm.response(question, image_base64)
+        
+        # TTS 兼容处理：阿拉伯数字转中文（Sherpa TTS 不支持数字）
+        result = _convert_digits_for_tts(result)
+        
+        # 直接返回给 TTS 播报
+        return ActionResponse(action=Action.RESPONSE, result=result, response=result)
+        
+    except Exception as e:
+        logger.bind(tag=TAG).error(f"Vision analyze error: {e}")
+        return ActionResponse(action=Action.RESPONSE, result="视觉分析失败", response="视觉分析失败，请稍后再试。")
