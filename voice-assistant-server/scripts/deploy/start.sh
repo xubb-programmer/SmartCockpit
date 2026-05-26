@@ -111,6 +111,12 @@ source "${CONDA_BASE}/etc/profile.d/conda.sh"
 conda activate "${CONDA_ENV}"
 info "conda 环境已激 ${CONDA_ENV}"
 
+# Relocated conda OpenSSL may point at a build-time openssl.cnf path.
+# Use the system config so HTTPS certificate generation is stable.
+if [ -f /etc/ssl/openssl.cnf ]; then
+    export OPENSSL_CONF=/etc/ssl/openssl.cnf
+fi
+
 # ================================================================
 # 2. 启动 RKLLM Flask Server
 # ================================================================

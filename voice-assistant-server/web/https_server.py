@@ -10,9 +10,32 @@ HTTPS 静态文件服务器
 import argparse
 import http.server
 import os
+import shutil
 import ssl
 import subprocess
 import sys
+
+
+def find_openssl_binary():
+    """Prefer the system OpenSSL because relocated conda envs may have a bad config path."""
+    for path in ("/usr/bin/openssl", "/bin/openssl"):
+        if os.path.exists(path):
+            return path
+    return shutil.which("openssl") or "openssl"
+
+
+def find_openssl_config():
+    """Return a valid openssl.cnf path for certificate generation."""
+    candidates = [
+        os.environ.get("OPENSSL_CONF"),
+        "/etc/ssl/openssl.cnf",
+        "/usr/lib/ssl/openssl.cnf",
+        os.path.join(sys.prefix, "ssl", "openssl.cnf"),
+    ]
+    for path in candidates:
+        if path and os.path.exists(path):
+            return path
+    return None
 
 
 def generate_self_signed_cert(cert_dir, host_ip):
@@ -27,19 +50,26 @@ def generate_self_signed_cert(cert_dir, host_ip):
     os.makedirs(cert_dir, exist_ok=True)
     print(f"[INFO] 正在生成自签名 SSL 证书...", flush=True)
 
+    openssl_config = find_openssl_config()
     cmd = [
-        "openssl", "req", "-x509",
+        find_openssl_binary(), "req", "-x509",
         "-newkey", "rsa:2048",
         "-keyout", key_file,
         "-out", cert_file,
         "-days", "3650",
         "-nodes",
         "-subj", f"/CN={host_ip}",
-        "-addext", f"subjectAltName=IP:{host_ip},IP:127.0.0.1,DNS:localhost",
     ]
+    if openssl_config:
+        cmd.extend(["-config", openssl_config])
+        print(f"[INFO] 使用 OpenSSL 配置: {openssl_config}", flush=True)
+    cmd.extend(["-addext", f"subjectAltName=IP:{host_ip},IP:127.0.0.1,DNS:localhost"])
 
     try:
-        subprocess.run(cmd, check=True, capture_output=True)
+        env = os.environ.copy()
+        if openssl_config:
+            env["OPENSSL_CONF"] = openssl_config
+        subprocess.run(cmd, check=True, capture_output=True, env=env)
         print(f"[INFO] ✓ SSL 证书已生成: {cert_dir}", flush=True)
     except subprocess.CalledProcessError as e:
         print(f"[ERROR] 生成证书失败: {e.stderr.decode()}", file=sys.stderr, flush=True)
