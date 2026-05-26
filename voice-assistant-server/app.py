@@ -77,14 +77,16 @@ async def main():
 
     read_config_from_api = config.get("read_config_from_api", False)
     port = int(config["server"].get("http_port", 8003))
+    web_http_port = 18006
+    web_https_port = 18007
     if not read_config_from_api:
         logger.bind(tag=TAG).info(
-            "OTA接口是\t\thttp://{}:{}/voice_assistant/ota/",
+            "OTA内部HTTP接口是\thttp://{}:{}/voice_assistant/ota/",
             get_local_ip(),
             port,
         )
     logger.bind(tag=TAG).info(
-        "视觉分析接口是\thttp://{}:{}/mcp/vision/explain",
+        "视觉分析内部HTTP接口是\thttp://{}:{}/mcp/vision/explain",
         get_local_ip(),
         port,
     )
@@ -107,17 +109,22 @@ async def main():
         websocket_port = int(server_config.get("port", 8000))
 
     logger.bind(tag=TAG).info(
-        "Websocket地址是\tws://{}:{}/voice_assistant/v1/",
+        "WebSocket内部地址是\tws://{}:{}/voice_assistant/v1/",
         get_local_ip(),
         websocket_port,
     )
 
     logger.bind(tag=TAG).info(
-        "=======上面的地址是websocket协议地址，请勿用浏览器访问======="
+        "=======上面的地址是内部原始服务地址，远程浏览器请使用HTTPS/WSS网关======="
     )
     logger.bind(tag=TAG).info(
-        "Web客户端地址: http://{}:8006/",
+        "Web客户端本机HTTP地址: http://127.0.0.1:{}/",
+        web_http_port,
+    )
+    logger.bind(tag=TAG).info(
+        "Web客户端远程安全入口(由deploy/start.sh启动): https://{}:{}/",
         get_local_ip(),
+        web_https_port,
     )
     logger.bind(tag=TAG).info(
         "=============================================================\n"

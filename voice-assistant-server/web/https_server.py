@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 HTTPS 静态文件服务器
-用途：为 Web 客户端提供 HTTPS 服务，使远程浏览器能够使用麦克风/摄像头
+用途：为 Web 客户端提供静态 HTTPS 页面，使浏览器处于安全上下文。
+注意：该脚本只提供静态文件 HTTPS，不代理 OTA/WS。远程浏览器完整连接请使用 https_gateway.py。
       （浏览器要求 getUserMedia 必须在安全上下文中调用）
 
 用法：python3 https_server.py [--port 18006] [--cert-dir ~/.ssl] [--host 192.168.0.201]

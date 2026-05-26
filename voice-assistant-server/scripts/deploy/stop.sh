@@ -38,7 +38,7 @@ wait_for_exit() {
 
 # 通用停止函数：SIGTERM → 等待 → SIGKILL
 stop_process() {
-    local name=$1 pid_file=$2 graceful=$3 force=$4
+    local name=$1 pid_file=$2 normal_timeout=$3 force=$4
 
     local pid=""
     if [ -f "${pid_file}" ]; then
@@ -60,11 +60,11 @@ stop_process() {
     info "停止 ${name} (PID=${pid})..."
     kill -TERM "${pid}" 2>/dev/null || true
 
-    printf "等待优雅退出"
-    if wait_for_exit "${pid}" "${graceful}"; then
+    printf "等待正常退出"
+    if wait_for_exit "${pid}" "${normal_timeout}"; then
         info "✓ ${name} 已正常退出"
     else
-        warn "${name} ${graceful}s 内未退出，强制终止..."
+        warn "${name} ${normal_timeout}s 内未退出，强制终止..."
         kill -KILL "${pid}" 2>/dev/null || true
         printf "等待强制退出"
         if wait_for_exit "${pid}" "${force}"; then
@@ -90,10 +90,10 @@ section "停止 Web 客户端 HTTP 服务"
 stop_process "Web HTTP服务" "${WEB_HTTP_PID_FILE}" 5 3 "http_server.py"
 
 # ================================================================
-# 2b. 停止 Web 客户端 HTTPS 服务
+# 2b. 停止 Web 客户端 HTTPS/WSS 网关
 # ================================================================
-section "停止 Web 客户端 HTTPS 服务"
-stop_process "Web HTTPS服务" "${WEB_HTTPS_PID_FILE}" 5 3 "https_server.py"
+section "停止 Web 客户端 HTTPS/WSS 网关"
+stop_process "Web HTTPS/WSS网关" "${WEB_HTTPS_PID_FILE}" 5 3 "https_gateway.py|https_server.py"
 
 # ================================================================
 # 3. 停止视觉分析服务
@@ -105,7 +105,7 @@ stop_process "视觉服务" "${VISION_PID_FILE}" 15 5 "vision_server.py"
 # 4. 再停 RKLLM Server（让 rkllm_model.release() 释放 NPU 资源）
 # ================================================================
 section "停止 RKLLM Server 并释放 NPU 资源"
-# 给 llm_server 更长的优雅退出时间（rkllm_model.release() 需要时间）
+# 给 llm_server 更长的正常退出时间（rkllm_model.release() 需要时间）
 stop_process "RKLLM Server" "${RKLLM_PID_FILE}" 20 5 "llm_server.py"
 
 # ================================================================
@@ -164,4 +164,4 @@ info "RKLLM 日志：tail -50 ${RKLLM_LOG}"
 info "视觉服务日志：tail -50 ${VISION_LOG}"
 info "voice_assistant 日志：tail -50 ${VOICE_ASSISTANT_LOG}"
 info "HTTP 日志：tail -50 ${WEB_HTTP_LOG}"
-info "HTTPS 日志：tail -50 ${WEB_HTTPS_LOG}"
+info "HTTPS/WSS 网关日志：tail -50 ${WEB_HTTPS_LOG}"

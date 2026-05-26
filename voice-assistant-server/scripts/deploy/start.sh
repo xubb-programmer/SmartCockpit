@@ -31,8 +31,9 @@ CONDA_ENV="voice-assistant-server"
 RKLLM_PORT=18080
 VISION_PORT=18090
 VOICE_ASSISTANT_WS_PORT=18000
-WEB_HTTP_PORT=18006           # Web 客户HTTP 服务端口（RK3588 自身通过 localhost 访问
-WEB_HTTPS_PORT=18007          # Web 客户HTTPS 服务端口（远程客户端访问
+VOICE_ASSISTANT_HTTP_PORT=18003
+WEB_HTTP_PORT=18006           # Web 客户端 HTTP 服务端口（RK3588 本机 localhost 访问）
+WEB_HTTPS_PORT=18007          # Web 客户端 HTTPS/WSS 网关端口（远程客户端访问）
 
 # 视觉模型文件
 VISION_RKNN_MODEL="${MODEL_DIR}/qwen3-vl-2b_vision_rk3588.rknn"
@@ -90,6 +91,29 @@ wait_for_port() {
 }
 
 is_running() { [ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null; }
+
+start_detached() {
+    local log_file=$1
+    local pid_file=$2
+    shift 2
+
+    rm -f "${pid_file}"
+    if command -v setsid >/dev/null 2>&1; then
+        nohup setsid bash -c 'echo $$ > "$1"; shift; exec "$@"' _ "${pid_file}" "$@" \
+            > "${log_file}" 2>&1 < /dev/null &
+    else
+        warn "未找到 setsid，后台服务可能仍会受到终端 Ctrl+C 影响"
+        nohup bash -c 'echo $$ > "$1"; shift; exec "$@"' _ "${pid_file}" "$@" \
+            > "${log_file}" 2>&1 < /dev/null &
+    fi
+
+    for _ in $(seq 1 20); do
+        [ -s "${pid_file}" ] && return 0
+        sleep 0.1
+    done
+
+    echo $! > "${pid_file}"
+}
 
 # ================================================================
 # 1. 初始conda
@@ -159,15 +183,14 @@ else
     fi
 
     export LD_LIBRARY_PATH="${RKLLM_SERVER_DIR}/lib:${LD_LIBRARY_PATH}"
-    nohup python3 llm_server.py \
+    start_detached "${RKLLM_LOG}" "${RKLLM_PID_FILE}" \
+        python3 llm_server.py \
         --rkllm_model_path "${MODEL_PATH}" \
         --target_platform  "${PLATFORM}" \
         --port "${RKLLM_PORT}" \
         --prompt_cache_path "${PROMPT_CACHE_PATH}" \
         --max_context_len  "${MAX_CTX}" \
-        ${WARMUP_ARGS} \
-        > "${RKLLM_LOG}" 2>&1 &
-    echo $! > "${RKLLM_PID_FILE}"
+        ${WARMUP_ARGS}
     info "RKLLM Server 已启动 (PID=$(cat ${RKLLM_PID_FILE}))"
 
     # 等待端口就绪（模型加载最90 秒）
@@ -199,13 +222,12 @@ if [[ "${ENABLE_VISION}" == "true" && -f "${VISION_RKNN_MODEL}" && -f "${VISION_
 
         cd "${RKLLM_SERVER_DIR}"
         export LD_LIBRARY_PATH="${RKLLM_SERVER_DIR}/lib:${LD_LIBRARY_PATH}"
-        nohup python3 vision_server.py \
+        start_detached "${VISION_LOG}" "${VISION_PID_FILE}" \
+            python3 vision_server.py \
             --rknn_model "${VISION_RKNN_MODEL}" \
             --rkllm_model "${VISION_RKLLM_MODEL}" \
             --npu_core 1 \
-            --port "${VISION_PORT}" \
-            > "${VISION_LOG}" 2>&1 &
-        echo $! > "${VISION_PID_FILE}"
+            --port "${VISION_PORT}"
         info "视觉服务已启动 (PID=$(cat ${VISION_PID_FILE}))"
 
     printf "加载中..."
@@ -244,8 +266,8 @@ else
     [ ! -f "${VOICE_ASSISTANT_DIR}/app.py" ] && { error "未找app.py: ${VOICE_ASSISTANT_DIR}/app.py"; exit 1; }
 
     cd "${VOICE_ASSISTANT_DIR}"
-    nohup python3 app.py > "${VOICE_ASSISTANT_LOG}" 2>&1 &
-    echo $! > "${VOICE_ASSISTANT_PID_FILE}"
+    start_detached "${VOICE_ASSISTANT_LOG}" "${VOICE_ASSISTANT_PID_FILE}" \
+        python3 app.py
     info "voice-assistant-server 已启动 (PID=$(cat ${VOICE_ASSISTANT_PID_FILE}))"
 
     printf "启动中..."
@@ -261,11 +283,11 @@ else
     fi
 fi
 
-section "启动 Web 客户端服务（HTTP + HTTPS）"
+section "启动 Web 客户端服务（HTTP + HTTPS/WSS）"
 
 TEST_DIR="${VOICE_ASSISTANT_DIR}/web"
 
-# ── 4a. HTTP 服务（RK3588 自身通过 127.0.0.1 访问，localhost 是安全上下文，支持麦克风
+# ── 4a. HTTP 服务（RK3588 本机通过 127.0.0.1 访问，localhost 是安全上下文，支持麦克风）
 if is_running "${WEB_HTTP_PID_FILE}"; then
     warn "Web HTTP服务已在运行 (PID=$(cat ${WEB_HTTP_PID_FILE}))"
 else
@@ -273,11 +295,10 @@ else
     if [ ! -f "${HTTP_SCRIPT}" ]; then
         warn "未找到 HTTP 服务脚本: ${HTTP_SCRIPT}，跳过启动"
     else
-        nohup python3 "${HTTP_SCRIPT}" \
+        start_detached "${WEB_HTTP_LOG}" "${WEB_HTTP_PID_FILE}" \
+            python3 "${HTTP_SCRIPT}" \
             --port "${WEB_HTTP_PORT}" \
-            --web-dir "${TEST_DIR}" \
-            > "${WEB_HTTP_LOG}" 2>&1 &
-        echo $! > "${WEB_HTTP_PID_FILE}"
+            --web-dir "${TEST_DIR}"
 
         printf "  HTTP 启动中..."
         if wait_for_port "${WEB_HTTP_PORT}" 10; then
@@ -288,27 +309,28 @@ else
     fi
 fi
 
-# ── 4b. HTTPS 服务（远程客户端访问，HTTPS 是安全上下文，支持麦克风
+# ── 4b. HTTPS/WSS 网关（远程客户端访问，统一安全入口，支持麦克风）
 if is_running "${WEB_HTTPS_PID_FILE}"; then
-    warn "Web HTTPS服务已在运行 (PID=$(cat ${WEB_HTTPS_PID_FILE}))"
+    warn "Web HTTPS/WSS网关已在运行 (PID=$(cat ${WEB_HTTPS_PID_FILE}))"
 else
-    HTTPS_SCRIPT="${TEST_DIR}/https_server.py"
+    HTTPS_SCRIPT="${TEST_DIR}/https_gateway.py"
     if [ ! -f "${HTTPS_SCRIPT}" ]; then
-        warn "未找到 HTTP 服务脚本: ${HTTP_SCRIPT}，跳过启动"
+        warn "未找到 HTTPS/WSS 网关脚本: ${HTTPS_SCRIPT}，跳过启动"
     else
-        nohup python3 "${HTTPS_SCRIPT}" \
+        start_detached "${WEB_HTTPS_LOG}" "${WEB_HTTPS_PID_FILE}" \
+            python3 "${HTTPS_SCRIPT}" \
             --port "${WEB_HTTPS_PORT}" \
             --host "${LOCAL_IP}" \
             --cert-dir "${HOME_DIR}/.ssl" \
             --web-dir "${TEST_DIR}" \
-            > "${WEB_HTTPS_LOG}" 2>&1 &
-        echo $! > "${WEB_HTTPS_PID_FILE}"
+            --http-target "http://127.0.0.1:${VOICE_ASSISTANT_HTTP_PORT}" \
+            --ws-target "ws://127.0.0.1:${VOICE_ASSISTANT_WS_PORT}"
 
-        printf "  HTTPS 启动中..."
+        printf "  HTTPS/WSS 网关启动中..."
         if wait_for_port "${WEB_HTTPS_PORT}" 10; then
-            info "Web HTTPS 服务就绪 (端口 ${WEB_HTTPS_PORT})"
+            info "Web HTTPS/WSS 网关就绪 (端口 ${WEB_HTTPS_PORT})"
         else
-            warn "HTTPS 服务可能仍在启动，请查看日志: ${WEB_HTTPS_LOG}"
+            warn "HTTPS/WSS 网关可能仍在启动，请查看日志: ${WEB_HTTPS_LOG}"
         fi
     fi
 fi
@@ -323,27 +345,33 @@ echo -e "  ${GREEN}Vision Server${NC}   PID=$(cat ${VISION_PID_FILE} 2>/dev/null
 fi
 echo -e "  ${GREEN}voice-assistant-server${NC}  PID=$(cat ${VOICE_ASSISTANT_PID_FILE} 2>/dev/null)  日志: ${VOICE_ASSISTANT_LOG}"
 echo -e "  ${GREEN}Web HTTP${NC}       PID=$(cat ${WEB_HTTP_PID_FILE} 2>/dev/null)  日志: ${WEB_HTTP_LOG}"
-echo -e "  ${GREEN}Web HTTPS${NC}      PID=$(cat ${WEB_HTTPS_PID_FILE} 2>/dev/null)  日志: ${WEB_HTTPS_LOG}"
+echo -e "  ${GREEN}Web HTTPS/WSS${NC}  PID=$(cat ${WEB_HTTPS_PID_FILE} 2>/dev/null)  日志: ${WEB_HTTPS_LOG}"
 echo
-echo -e "  WebSocket : ${CYAN}ws://${LOCAL_IP}:${VOICE_ASSISTANT_WS_PORT}/voice_assistant/v1/${NC}"
-echo -e "  OTA HTTP  : ${CYAN}http://${LOCAL_IP}:18003/voice_assistant/ota/${NC}"
 echo -e "  RKLLM API : ${CYAN}http://${LOCAL_IP}:${RKLLM_PORT}/rkllm_chat${NC}"
 if [ -f "${VISION_PID_FILE}" ]; then
 echo -e "  Vision API: ${CYAN}http://${LOCAL_IP}:${VISION_PORT}/vision/analyze${NC}"
 fi
 echo
-echo -e "  ${YELLOW}[RK3588 本机访问]${NC} (支持麦克+ WebSocket)"
-echo -e "    地址: ${CYAN}http://127.0.0.1:${WEB_HTTP_PORT}/${NC}"
-echo -e "    OTA:  ${CYAN}http://127.0.0.1:18003/voice_assistant/ota/${NC}"
+echo -e "  ${YELLOW}[RK3588 本机浏览器]${NC} (localhost 是安全上下文，支持麦克风)"
+echo -e "    页面: ${CYAN}http://127.0.0.1:${WEB_HTTP_PORT}/${NC}"
+echo -e "    OTA : ${CYAN}http://127.0.0.1:${VOICE_ASSISTANT_HTTP_PORT}/voice_assistant/ota/${NC}"
 echo
-echo -e "  ${YELLOW}[远程客户端访问]${NC} (支持麦克风，首次需接受证书)"
-echo -e "    地址: ${CYAN}https://${LOCAL_IP}:${WEB_HTTPS_PORT}/${NC}"
-echo -e "    OTA:  ${CYAN}http://${LOCAL_IP}:18003/voice_assistant/ota/${NC}"
+echo -e "  ${YELLOW}[远程浏览器推荐入口]${NC} (HTTPS + WSS 同源访问，首次需接受证书)"
+echo -e "    页面: ${CYAN}https://${LOCAL_IP}:${WEB_HTTPS_PORT}/${NC}"
+echo -e "    OTA : ${CYAN}https://${LOCAL_IP}:${WEB_HTTPS_PORT}/voice_assistant/ota/${NC}"
+echo -e "    WS  : ${CYAN}wss://${LOCAL_IP}:${WEB_HTTPS_PORT}/voice_assistant/v1/${NC}"
 echo
-info "停止服务请运 ./stop.sh"
+echo -e "  ${YELLOW}[内部原始服务]${NC} (供网关转发/设备直连；远程浏览器不要直接填这些 HTTP/WS 地址)"
+echo -e "    OTA HTTP: ${CYAN}http://${LOCAL_IP}:${VOICE_ASSISTANT_HTTP_PORT}/voice_assistant/ota/${NC}"
+echo -e "    WS      : ${CYAN}ws://${LOCAL_IP}:${VOICE_ASSISTANT_WS_PORT}/voice_assistant/v1/${NC}"
 echo
-info "正在显示实时日志（Ctrl+C 退出日志，服务不会停止.."
+info "停止服务请运行 ./stop.sh"
+echo
+info "正在显示实时日志（Ctrl+C 仅退出日志，服务不会停止）"
 echo -e "${CYAN}────────────────────── 实时日志 ──────────────────────${NC}"
 
-# tail -f 同时追踪所有服务日
-tail -f "${RKLLM_LOG}" "${VISION_LOG}" "${VOICE_ASSISTANT_LOG}" 2>/dev/null || true
+# tail -f 同时追踪主要服务日志
+tail -f "${RKLLM_LOG}" "${VISION_LOG}" "${VOICE_ASSISTANT_LOG}" "${WEB_HTTPS_LOG}" 2>/dev/null || true
+echo
+info "已退出实时日志，服务仍在后台运行"
+info "再次查看日志请运行 ./logs.sh"

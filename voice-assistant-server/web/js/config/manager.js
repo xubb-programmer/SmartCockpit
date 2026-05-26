@@ -13,6 +13,35 @@ function generateRandomMac() {
     return mac;
 }
 
+function getDefaultOtaUrl() {
+    const { protocol, hostname, host } = window.location;
+    if (protocol === 'https:') {
+        return `${protocol}//${host}/voice_assistant/ota/`;
+    }
+    if (protocol === 'http:' && hostname && hostname !== 'localhost' && hostname !== '127.0.0.1') {
+        return `http://${hostname}:18003/voice_assistant/ota/`;
+    }
+    return 'http://127.0.0.1:18003/voice_assistant/ota/';
+}
+
+function normalizeOtaUrl(otaUrl) {
+    if (!otaUrl) {
+        return getDefaultOtaUrl();
+    }
+    if (window.location.protocol !== 'https:') {
+        return otaUrl;
+    }
+    try {
+        const parsed = new URL(otaUrl);
+        if (parsed.protocol === 'http:' && parsed.pathname.startsWith('/voice_assistant/ota/')) {
+            return getDefaultOtaUrl();
+        }
+    } catch (error) {
+        return getDefaultOtaUrl();
+    }
+    return otaUrl;
+}
+
 // 加载配置
 export function loadConfig() {
     const deviceMacInput = document.getElementById('deviceMac');
@@ -40,9 +69,8 @@ export function loadConfig() {
     }
 
     const savedOtaUrl = localStorage.getItem('xz_tester_otaUrl');
-    if (savedOtaUrl) {
-        otaUrlInput.value = savedOtaUrl;
-    }
+    otaUrlInput.value = normalizeOtaUrl(savedOtaUrl);
+    localStorage.setItem('xz_tester_otaUrl', otaUrlInput.value);
 }
 
 // 保存配置

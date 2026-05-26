@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 HTTP 静态文件服务器
-用途：为 Web 客户端提供 HTTP 服务（无 SSL），适用于 RK3588 本机或局域网内访问。
-      如需远程浏览器使用麦克风（getUserMedia），请改用 https_server.py。
+用途：为 Web 客户端提供 HTTP 服务（无 SSL），适用于 RK3588 本机 localhost 访问。
+      如需远程浏览器使用麦克风（getUserMedia），请通过 deploy/start.sh 启动 HTTPS/WSS 网关。
 
 用法：python3 http_server.py [--port 18006] [--host 0.0.0.0] [--web-dir /path/to/web]
 """
