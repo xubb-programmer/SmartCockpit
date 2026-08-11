@@ -12,6 +12,7 @@ if TYPE_CHECKING:
 
 TAG = __name__
 logger = setup_logging()
+HTTP_TIMEOUT = 10
 
 GET_NEWS_FROM_CHINANEWS_FUNCTION_DESC = {
     "type": "function",
@@ -48,7 +49,7 @@ GET_NEWS_FROM_CHINANEWS_FUNCTION_DESC = {
 def fetch_news_from_rss(rss_url):
     """从RSS源获取新闻列表"""
     try:
-        response = requests.get(rss_url)
+        response = requests.get(rss_url, timeout=HTTP_TIMEOUT)
         response.raise_for_status()
 
         # 解析XML
@@ -90,7 +91,7 @@ def fetch_news_from_rss(rss_url):
 def fetch_news_detail(url):
     """获取新闻详情页内容并总结"""
     try:
-        response = requests.get(url)
+        response = requests.get(url, timeout=HTTP_TIMEOUT)
         response.raise_for_status()
 
         soup = BeautifulSoup(response.content, "html.parser")

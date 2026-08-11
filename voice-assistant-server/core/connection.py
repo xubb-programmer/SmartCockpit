@@ -1204,8 +1204,9 @@ class ConnectionHandler:
                     self.dialogue.put(Message(role="assistant", content=text_buff))
                 response_message.clear()
 
-                # 收集所有工具调用的 Future
-                futures_with_data = []
+                # 多工具调用按模型输出顺序执行，确保“先...再...”语义不被并发破坏。
+                tool_call_timeout = int(self.config.get("tool_call_timeout", 30))
+                tool_results = []
                 for tool_call_data in tool_calls_list:
                     self.logger.bind(tag=TAG).debug(
                         f"function_name={tool_call_data['name']}, function_id={tool_call_data['id']}, function_arguments={tool_call_data['arguments']}"
@@ -1221,14 +1222,6 @@ class ConnectionHandler:
                         ),
                         self.loop,
                     )
-                    futures_with_data.append((future, tool_call_data, tool_input))
-
-                # 工具调用超时时间，可配置，默认30秒
-                tool_call_timeout = int(self.config.get("tool_call_timeout", 30))
-                # 等待协程结束（实际等待时长为最慢的那个）
-                tool_results = []
-
-                for future, tool_call_data, tool_input in futures_with_data:
                     try:
                         result = future.result(timeout=tool_call_timeout)
                         tool_results.append((result, tool_call_data))

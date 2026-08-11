@@ -38,7 +38,7 @@ vehicle_status_function_desc = {
                 "target": {
                     "type": "string",
                     "description": (
-                        "设备标识，如 vis_cam / ir_cam / gimbal / laser / tracker。"
+                        "设备标识，如 vis_cam / ir_cam / gimbal / laser / tracker / mast。"
                         "不传或为空则查询所有设备状态。"
                     ),
                 },
@@ -134,14 +134,139 @@ def _query_status(conn: "ConnectionHandler", target: str = None) -> dict:
         return {"error": "无法连接设备控制端"}
 
 
+_EXT_STATE_VALUE_CN: Dict[str, str] = {
+    "on": "开",
+    "off": "关",
+    "open": "开",
+    "closed": "关",
+    "unknown": "未知",
+    "normal": "正常",
+    "manual": "手动",
+    "idle": "空闲",
+    "": "未设置",
+    "large": "大",
+    "small": "小",
+    "digital": "数字变倍",
+    "in": "放大",
+    "out": "缩小",
+    "auto": "自动",
+    "black": "黑热",
+    "white": "白热",
+    "up": "增加",
+    "down": "降低",
+    "scene": "场景校正",
+    "gamma": "图像校正",
+    "return": "回零",
+    "drift": "零漂校正",
+    "circle": "周扫中",
+    "cw": "顺时针",
+    "ccw": "逆时针",
+    "park": "驻车展开",
+    "drive": "行车展开",
+    "onekey": "一键展开",
+    "ended": "已撤收",
+    "stopped": "已停止",
+    "raised": "升起",
+    "lowered": "降下",
+    "single": "单次调平",
+}
+
+_EXT_STATE_KEY_CN: Dict[str, str] = {
+    "power": "电源",
+    "cross": "十字丝",
+    "enhance": "增强",
+    "fog": "透雾",
+    "detect": "识别",
+    "track": "跟踪",
+    "recon": "侦察",
+    "view": "视场",
+    "zoom": "变倍",
+    "zoom_level": "变倍",
+    "focus": "聚焦",
+    "brightness": "亮度",
+    "polarity": "极性",
+    "contrast": "对比度",
+    "mode": "模式",
+    "correction": "校正",
+    "zero": "零位",
+    "scan": "扫描",
+    "scan_direction": "方向",
+    "scan_count": "圈数",
+    "work": "作业",
+    "mast": "桅杆",
+    "level": "调平",
+}
+
+def _should_skip_status_value(key: str, value: object, status: dict) -> bool:
+    return False
+
+
+def _format_status_part(key: str, value: object) -> str:
+    value_text = "" if value is None else str(value)
+    value_cn = _EXT_STATE_VALUE_CN.get(value_text, _STATE_VALUE_CN.get(value_text, value_text))
+    key_cn = _EXT_STATE_KEY_CN.get(key, _STATE_KEY_CN.get(key, key))
+
+    if key == "view":
+        return f"视场{value_cn}"
+    if key == "zoom":
+        if value_text == "digital":
+            return "数字变倍"
+        return f"变倍{value_cn}"
+    if key == "zoom_level":
+        if value_text:
+            return f"倍率{value_text}倍"
+        return "倍率未设置"
+    if key == "focus":
+        if value_text == "auto":
+            return "自动聚焦"
+        return f"聚焦{value_cn}"
+    if key == "brightness":
+        return f"亮度{value_cn}"
+    if key == "polarity":
+        return f"极性{value_cn}"
+    if key == "contrast":
+        return f"对比度{value_cn}"
+    if key == "mode":
+        return f"{value_cn}模式"
+    if key == "correction":
+        if value_text in ("gamma", "scene"):
+            return value_cn
+        return f"校正{value_cn}"
+    if key == "zero":
+        if value_text in ("return", "drift"):
+            return value_cn
+        return f"零位{value_cn}"
+    if key == "scan":
+        if value_text == "circle":
+            return value_cn
+        return f"扫描{value_cn}"
+    if key == "scan_direction":
+        return f"方向{value_cn}"
+    if key == "scan_count":
+        if value_text:
+            return f"圈数{value_text}圈"
+        return "圈数未设置"
+    if key == "work":
+        if value_text in ("park", "drive", "onekey", "ended", "stopped"):
+            return value_cn
+        return f"作业{value_cn}"
+    if key == "mast":
+        return f"桅杆{value_cn}"
+    if key == "level":
+        if value_text == "single":
+            return value_cn
+        return f"调平{value_cn}"
+    return f"{key_cn}{value_cn}"
+
+
 def _format_device_status(vc, dev_id: str, status: dict) -> str:
     """将单个设备的状态字典格式化为中文播报。"""
     dev_cn = vc.device_cn_name(dev_id)
     parts = []
     for key, value in status.items():
-        key_cn = _STATE_KEY_CN.get(key, key)
-        val_cn = _STATE_VALUE_CN.get(value, value)
-        parts.append(f"{key_cn}{val_cn}")
+        if _should_skip_status_value(key, value, status):
+            continue
+        parts.append(_format_status_part(key, value))
     if not parts:
         return f"{dev_cn}无状态信息"
     return f"{dev_cn}：{'，'.join(parts)}"

@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>智能控制中心</title>
-    <link rel="stylesheet" href="css/style.css?v=0205">
+    <link rel="stylesheet" href="css/style.css?v=0528">
     <script>
         // 检测是否使用file://协议打开
         if (window.location.protocol === 'file:') {
@@ -343,7 +343,7 @@
     <script src="js/utils/libopus.js?v=0205"></script>
 
     <!-- 主应用入口 -->
-    <script type="module" src="js/app.js?v=0419"></script>
+    <script type="module" src="js/app.js?v=0528"></script>
 
     <!-- 全局错误处理 -->
     <script>
@@ -375,7 +375,7 @@
             try {
                 const res = await fetch(`${base}/voice_assistant/vehicle/profiles`);
                 const data = await res.json();
-                sel.innerHTML = '';
+                sel.replaceChildren();
                 (data.profiles || []).forEach(p => {
                     const opt = document.createElement('option');
                     opt.value = p.id;
@@ -385,7 +385,12 @@
                 });
                 if (msg) msg.textContent = `当前: ${data.current || '未设置'}`;
             } catch (e) {
-                if (sel) sel.innerHTML = '<option value="">-- 无法连接服务器 --</option>';
+                if (sel) {
+                    const opt = document.createElement('option');
+                    opt.value = '';
+                    opt.textContent = '-- 无法连接服务器 --';
+                    sel.replaceChildren(opt);
+                }
             }
         }
 
@@ -448,6 +453,13 @@
     <script>
     // ── 帮助弹窗 ──────────────────────────────────────────────────
     (function () {
+        function setHelpMessage(container, className, text) {
+            const message = document.createElement('div');
+            message.className = className;
+            message.textContent = text;
+            container.replaceChildren(message);
+        }
+
         function getApiBase() {
             const ota = document.getElementById('otaUrl')?.value || '';
             try { return new URL(ota).origin; } catch (e) { return ''; }
@@ -457,16 +469,16 @@
             const base = getApiBase();
             const container = document.getElementById('helpCommandsContainer');
             if (!base) {
-                container.innerHTML = '<div class="help-empty">请先配置 OTA 服务器地址</div>';
+                setHelpMessage(container, 'help-empty', '请先配置 OTA 服务器地址');
                 return;
             }
-            container.innerHTML = '<div class="help-loading">加载中...</div>';
+            setHelpMessage(container, 'help-loading', '加载中...');
 
             try {
                 const res = await fetch(`${base}/voice_assistant/vehicle/commands`);
                 const data = await res.json();
                 if (data.error) {
-                    container.innerHTML = `<div class="help-empty">❌ ${data.error}</div>`;
+                    setHelpMessage(container, 'help-empty', `❌ ${data.error}`);
                     return;
                 }
 
@@ -475,31 +487,45 @@
                 if (title) title.textContent = `${data.vehicle_name} · 语音指令`;
 
                 // 渲染指令列表
-                let html = '';
+                const fragment = document.createDocumentFragment();
                 (data.commands || []).forEach(group => {
-                    html += `<div class="help-category">`;
-                    html += `<div class="help-category-header">${group.icon} ${group.category}</div>`;
-                    html += `<div class="help-cmd-grid">`;
-                    (group.items || []).forEach(item => {
-                        const escaped = item.text.replace(/"/g, '&quot;');
-                        html += `<button class="help-cmd-btn" data-cmd="${escaped}" title="${item.description}">`;
-                        html += `<span class="help-cmd-text">${item.text}</span>`;
-                        html += `<span class="help-cmd-desc">${item.description}</span>`;
-                        html += `</button>`;
-                    });
-                    html += `</div></div>`;
-                });
-                container.innerHTML = html;
+                    const category = document.createElement('div');
+                    category.className = 'help-category';
 
-                // 绑定点击事件
-                container.querySelectorAll('.help-cmd-btn').forEach(btn => {
-                    btn.addEventListener('click', () => {
-                        const cmd = btn.getAttribute('data-cmd');
-                        sendCommand(cmd);
+                    const header = document.createElement('div');
+                    header.className = 'help-category-header';
+                    header.textContent = `${group.icon || ''} ${group.category || ''}`.trim();
+                    category.appendChild(header);
+
+                    const grid = document.createElement('div');
+                    grid.className = 'help-cmd-grid';
+                    (group.items || []).forEach(item => {
+                        const text = String(item.text ?? '');
+                        const description = String(item.description ?? '');
+
+                        const button = document.createElement('button');
+                        button.className = 'help-cmd-btn';
+                        button.dataset.cmd = text;
+                        button.title = description;
+                        button.addEventListener('click', () => sendCommand(text));
+
+                        const textSpan = document.createElement('span');
+                        textSpan.className = 'help-cmd-text';
+                        textSpan.textContent = text;
+
+                        const descSpan = document.createElement('span');
+                        descSpan.className = 'help-cmd-desc';
+                        descSpan.textContent = description;
+
+                        button.append(textSpan, descSpan);
+                        grid.appendChild(button);
                     });
+                    category.appendChild(grid);
+                    fragment.appendChild(category);
                 });
+                container.replaceChildren(fragment);
             } catch (e) {
-                container.innerHTML = `<div class="help-empty">❌ 无法连接服务器</div>`;
+                setHelpMessage(container, 'help-empty', '❌ 无法连接服务器');
             }
         }
 

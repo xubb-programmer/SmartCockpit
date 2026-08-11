@@ -34,6 +34,7 @@ class LLMProvider(LLMProviderBase):
                 "messages": [{"role": "user", "content": last_msg["content"]}],
             },
             stream=True,
+            timeout=(10, 120),
         ) as r:
             for line in r.iter_lines():
                 if line:

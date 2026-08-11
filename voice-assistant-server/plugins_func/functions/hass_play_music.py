@@ -60,7 +60,7 @@ async def handle_hass_play_music(
     url = f"{base_url}/api/services/music_assistant/play_media"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     data = {"entity_id": entity_id, "media_id": media_content_id}
-    response = requests.post(url, headers=headers, json=data)
+    response = requests.post(url, headers=headers, json=data, timeout=10)
     if response.status_code == 200:
         return f"正在播放{media_content_id}的音乐"
     else:

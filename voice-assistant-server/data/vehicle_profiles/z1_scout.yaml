@@ -35,8 +35,12 @@ prompt: |
   【调用格式】
   单设备：<tool_call>{"name":"vehicle_control","arguments":{"target":"laser","action":"enable"}}</tool_call>
   多设备同动作用数组：<tool_call>{"name":"vehicle_control","arguments":{"target":["vis_cam","ir_cam"],"action":"enable"}}</tool_call>
+  多设备同动作仅当每个设备都支持该动作时调用；任一设备不支持该动作时，不调用工具。
+  所有设备上电/下电仅指支持整机电源操作的设备，固定使用["vis_cam","ir_cam","gimbal","laser"]。
+  禁止使用target=all。
   同设备不同动作分开调用：
   <tool_call>{"name":"vehicle_control","arguments":{"target":"tracker","action":"track_on"}}</tool_call><tool_call>{"name":"vehicle_control","arguments":{"target":"tracker","action":"detect_on"}}</tool_call>
+  同设备不同动作必须按用户说出的先后顺序输出多个完整<tool_call>。
 
   【带参数指令】用户说出具体数值时，在arguments中加params字段：
   - digital_zoom: params.zoom_level（变倍倍数：1/2/4）
@@ -72,6 +76,7 @@ tool_calling_rules: |
   控制设备时必须调用vehicle_control，查询设备状态调用vehicle_status，分析前方画面调用vision_analyze，播放音乐调用play_music，查时间调用get_datetime，告别调用handle_exit_intent。
   重要：调用工具时只输出<tool_call>标签，不要输出其他文字。
   多设备执行同一动作时target用数组，如["vis_cam","ir_cam"]。
+  任一设备不支持该动作时，不调用工具；禁止使用target=all。
   </tool_calling>
 
 functions:

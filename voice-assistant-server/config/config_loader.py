@@ -1,7 +1,10 @@
 import os
+import re
 import yaml
 from collections.abc import Mapping
 from config.manage_api_client import init_service, get_server_config, get_agent_models
+
+_VEHICLE_PROFILE_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
 
 def get_project_dir():
@@ -165,6 +168,24 @@ def merge_configs(default_config, custom_config):
     return merged
 
 
+def _resolve_vehicle_profile_path(profile_name):
+    if not isinstance(profile_name, str) or not _VEHICLE_PROFILE_ID_RE.fullmatch(
+        profile_name
+    ):
+        return None
+
+    profiles_dir = os.path.realpath(
+        os.path.join(get_project_dir(), "data", "vehicle_profiles")
+    )
+    profile_path = os.path.realpath(os.path.join(profiles_dir, f"{profile_name}.yaml"))
+    try:
+        if os.path.commonpath([profiles_dir, profile_path]) != profiles_dir:
+            return None
+    except ValueError:
+        return None
+    return profile_path
+
+
 def _apply_vehicle_profile(config):
     """
     如果配置中指定了 vehicle_profile，从 data/vehicle_profiles/<name>.yaml
@@ -174,9 +195,11 @@ def _apply_vehicle_profile(config):
     if not profile_name:
         return config
 
-    profile_path = os.path.join(
-        get_project_dir(), "data", "vehicle_profiles", f"{profile_name}.yaml"
-    )
+    profile_path = _resolve_vehicle_profile_path(profile_name)
+    if not profile_path:
+        print(f"[Profile] 警告：车型配置名称非法: {profile_name}")
+        return config
+
     if not os.path.exists(profile_path):
         print(f"[Profile] 警告：车型配置文件不存在: {profile_path}")
         return config

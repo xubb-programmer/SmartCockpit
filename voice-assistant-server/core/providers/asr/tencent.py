@@ -185,7 +185,9 @@ class ASRProvider(ASRProviderBase):
         }
 
         try:
-            response = requests.post(self.API_URL, headers=headers, data=request_body)
+            response = requests.post(
+                self.API_URL, headers=headers, data=request_body, timeout=30
+            )
 
             if not response.ok:
                 raise IOError(f"请求失败: {response.status_code} {response.reason}")

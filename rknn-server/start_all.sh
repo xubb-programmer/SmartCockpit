@@ -12,10 +12,20 @@ echo "=========================================="
 # 使用进程组管理，确保 kill 时子进程也被终止
 set -m
 
+start_service_group() {
+    local script=$1
+    if command -v setsid >/dev/null 2>&1; then
+        setsid bash "${script}" &
+    else
+        bash "${script}" &
+    fi
+    SERVICE_PID=$!
+}
+
 # 启动文本 LLM 服务（后台运行）
 echo "[1/2] 启动文本 LLM 服务..."
-bash start_llm.sh &
-LLM_PID=$!
+start_service_group start_llm.sh
+LLM_PID=${SERVICE_PID}
 echo "  LLM 服务 PID: ${LLM_PID}"
 
 # 轮询 LLM 健康检查（替代硬编码 15s 等待）
@@ -34,8 +44,8 @@ done
 
 # 启动视觉分析服务（后台运行）
 echo "[2/2] 启动视觉分析服务..."
-bash start_vision.sh &
-VISION_PID=$!
+start_service_group start_vision.sh
+VISION_PID=${SERVICE_PID}
 echo "  视觉服务 PID: ${VISION_PID}"
 
 VISION_PORT="${VISION_PORT:-18090}"

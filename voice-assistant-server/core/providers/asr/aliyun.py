@@ -75,7 +75,7 @@ class AccessToken:
         )
         # print('url: %s' % full_url)
         # 提交HTTP GET请求
-        response = requests.get(full_url)
+        response = requests.get(full_url, timeout=10)
         if response.ok:
             root_obj = response.json()
             key = "Token"

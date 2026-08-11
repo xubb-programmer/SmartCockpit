@@ -173,9 +173,9 @@ else
 
     # 静prompt 文件（由 generate_prompt_cache.sh 生成，用于启动预set_function_tools
     SYSTEM_PROMPT_FILE="${MODEL_DIR}/voice_assistant_static_prompt.txt"
-    WARMUP_ARGS=""
+    WARMUP_ARGS=()
     if [ -f "${SYSTEM_PROMPT_FILE}" ]; then
-        WARMUP_ARGS="--system_prompt_file ${SYSTEM_PROMPT_FILE}"
+        WARMUP_ARGS=(--system_prompt_file "${SYSTEM_PROMPT_FILE}")
         info "找到静prompt 文件，启动时将预set_function_tools"
     else
         warn "未找${SYSTEM_PROMPT_FILE}，首次请求将~8s 延迟"
@@ -190,7 +190,7 @@ else
         --port "${RKLLM_PORT}" \
         --prompt_cache_path "${PROMPT_CACHE_PATH}" \
         --max_context_len  "${MAX_CTX}" \
-        ${WARMUP_ARGS}
+        "${WARMUP_ARGS[@]}"
     info "RKLLM Server 已启动 (PID=$(cat ${RKLLM_PID_FILE}))"
 
     # 等待端口就绪（模型加载最90 秒）

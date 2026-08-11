@@ -37,10 +37,14 @@ vehicle_control_function_desc = {
             "type": "object",
             "properties": {
                 "target": {
-                    "type": "string",
+                    "anyOf": [
+                        {"type": "string"},
+                        {"type": "array", "items": {"type": "string"}},
+                    ],
                     "description": (
                         "设备标识：vis_cam / ir_cam / gimbal / laser / tracker / mast。"
-                        "控制所有设备时使用 all。"
+                        "控制多个设备时传字符串数组；禁止使用 all。"
+                        "数组中每个设备都必须支持该动作，否则整条指令不执行。"
                     ),
                 },
                 "action": {
@@ -362,13 +366,12 @@ def vehicle_control(
         targets = target
         actions = action if isinstance(action, list) else [action] * len(targets)
 
-        # 处理 "all" 关键字：展开为当前车型所有设备
-        if any(t.lower() == "all" for t in targets):
-            all_action = actions[0] if actions else action
-            targets = list(vc.devices.keys())
-            actions = [all_action] * len(targets)
-            logger.bind(tag=TAG).info(
-                f"[vehicle_control] 'all' → 展开为 {targets}, action={all_action}"
+        if any(isinstance(t, str) and t.lower() == "all" for t in targets):
+            logger.bind(tag=TAG).warning("[vehicle_control] 批量指令拒绝 target=all")
+            return ActionResponse(
+                action=Action.RESPONSE,
+                result=json.dumps({"error": "禁止使用 target=all"}, ensure_ascii=False),
+                response="请明确需要控制的设备",
             )
 
         if len(actions) != len(targets):
@@ -378,29 +381,26 @@ def vehicle_control(
                 response="指令参数错误",
             )
 
-        # 预过滤：跳过不支持该动作的设备
-        valid_pairs = []
-        skipped = []
+        # 原子预检：任何目标或动作不合法时，整批指令都不执行。
+        invalid_pairs = []
         for t, a in zip(targets, actions):
             if not vc.is_valid_device(t) or not vc.is_valid_action(t, a):
-                skipped.append(t)
-            else:
-                valid_pairs.append((t, a))
+                invalid_pairs.append({"target": t, "action": a})
 
-
-        if skipped:
-            skipped_names = [vc.device_cn_name(s) for s in skipped]
-            logger.bind(tag=TAG).info(
-                f"[vehicle_control] 批量跳过不支持该动作的设备: {skipped_names}"
+        if invalid_pairs:
+            logger.bind(tag=TAG).warning(
+                f"[vehicle_control] 批量原子校验失败，整批拒绝: {invalid_pairs}"
             )
-
-        if not valid_pairs:
             return ActionResponse(
                 action=Action.RESPONSE,
-                result=json.dumps({"error": "没有设备支持该操作"}, ensure_ascii=False),
-                response="当前没有设备支持该操作",
+                result=json.dumps(
+                    {"error": "批量指令包含不支持的设备或动作", "invalid": invalid_pairs},
+                    ensure_ascii=False,
+                ),
+                response="当前组合不支持统一操作",
             )
 
+        valid_pairs = list(zip(targets, actions))
         responses = []
         failed = []
         for t, a in valid_pairs:
@@ -424,24 +424,24 @@ def vehicle_control(
 
         logger.bind(tag=TAG).info(
             f"[vehicle_control] 批量执行 {len(valid_pairs)} 个设备, "
-            f"成功 {len(responses)}, 失败 {len(failed)}, 跳过 {len(skipped)}"
+            f"成功 {len(responses)}, 失败 {len(failed)}"
         )
         return ActionResponse(
             action=Action.RESPONSE,
             result=json.dumps(
-                {"batch": len(valid_pairs), "failed": failed, "skipped": skipped},
+                {"batch": len(valid_pairs), "failed": failed},
                 ensure_ascii=False,
             ),
             response=response,
         )
 
-    # ── 单设备指令（字符串 "all" 也展开为批量）─────────────────────────────────
+    # ── 单设备指令 ────────────────────────────────────────────────────────────
     if isinstance(target, str) and target.lower() == "all":
-        all_targets = list(vc.devices.keys())
-        logger.bind(tag=TAG).info(
-            f"[vehicle_control] target='all' → 展开为 {all_targets}, action={action}"
+        logger.bind(tag=TAG).warning("[vehicle_control] 拒绝 target=all")
+        return ActionResponse(
+            action=Action.RESPONSE,
+            result=json.dumps({"error": "禁止使用 target=all"}, ensure_ascii=False),
+            response="请明确需要控制的设备",
         )
-        return vehicle_control(conn, target=all_targets, action=action, params=params)
 
     return _execute_single(conn, vc, target, action, params)
-

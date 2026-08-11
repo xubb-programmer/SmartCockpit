@@ -72,7 +72,7 @@ Always adhere to this format for the tool use to ensure proper parsing and execu
 
 1. Tools must be called in a separate message, Do not add thoughts when calling tools. The message must start with <tool_call> and end with </tool_call>, with the tool invocation JSON data in between. No additional response content is needed.
 2. Choose the most appropriate tool based on the task and the tool descriptions provided. Assess if you need additional information to proceed, and which of the available tools would be most effective for gathering this information. 
-   For example using the list_files tool is more effective than running a command like \`ls\` in the terminal. It's critical that you think about each available tool and use the one that best fits the current step in the task.
+   For example using the list_files tool is more effective than running a command like `ls` in the terminal. It's critical that you think about each available tool and use the one that best fits the current step in the task.
 3. If multiple actions are needed, use one tool at a time per message to accomplish the task iteratively, with each tool use being informed by the result of the previous tool use. Do not assume the outcome of any tool use. 
    Each step must be informed by the previous step's result.
 4. Formulate your tool use using the JSON format specified for each tool.

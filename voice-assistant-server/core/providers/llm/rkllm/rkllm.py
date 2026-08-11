@@ -37,6 +37,10 @@ class LLMProvider(LLMProviderBase):
         self.base_url = config.get("base_url", "http://localhost:18080/rkllm_chat")
         self.model_name = config.get("model_name", "rkllm_model")
         self.timeout = int(config.get("timeout", 120))
+        verify_ssl = config.get("verify_ssl", False)
+        if isinstance(verify_ssl, str):
+            verify_ssl = verify_ssl.strip().lower() in ("1", "true", "yes", "on")
+        self.verify_ssl = bool(verify_ssl)
 
         self.session = requests.Session()
         self.session.headers.update({
@@ -77,7 +81,7 @@ class LLMProvider(LLMProviderBase):
         for attempt in range(max_retries):
             resp = self.session.post(
                 self.base_url, json=payload, stream=stream,
-                timeout=self.timeout, verify=False,
+                timeout=self.timeout, verify=self.verify_ssl,
             )
             if resp.status_code != 503:
                 break
@@ -323,38 +327,8 @@ class LLMProvider(LLMProviderBase):
                                     yield buffer, None
                                 buffer = ""
 
-                        # True/None: 缓冲模式，增量检测完整 JSON
-                        if tool_call_mode is not False and len(buffer) > 20:
-                            tc_json = self._extract_tool_call(buffer)
-                            if tc_json:
-                                # 检查第一个工具调用之后是否还有未完成的 <tool_call>
-                                first_end = buffer.find('</tool_call>')
-                                if first_end >= 0:
-                                    remaining = buffer[first_end + len('</tool_call>'):].strip()
-                                    if remaining.startswith('<tool_call') and '</tool_call>' not in remaining:
-                                        # 还有未完成的工具调用，继续缓冲
-                                        continue
-                                # 提取所有完整的工具调用
-                                import re as _re
-                                all_tc = _re.findall(
-                                    r'<tool_call>\s*(.*?)\s*</tool_call>',
-                                    buffer, _re.DOTALL
-                                )
-                                if all_tc:
-                                    tc_result = ''.join(
-                                        f'<tool_call>{tc}</tool_call>' for tc in all_tc
-                                    )
-                                else:
-                                    tc_result = f'<tool_call>{tc_json}</tool_call>'
-                                logger.bind(tag=TAG).info(
-                                    f"[TC] 增量检测到{len(all_tc) if all_tc else 1}个工具调用: {tc_result[:80]}"
-                                )
-                                yield tc_result, None
-                                # 🔥 提前返回工具调用，跳过剩余 token
-                                # 服务端 finally 块会等待模型完成并更新 sent_count
-                                logger.bind(tag=TAG).debug("[TC] 提前终止推理流")
-                                resp.close()
-                                return
+                        # 工具调用保持缓冲到 stop/流结束，再统一提取全部调用。
+                        # 不能在第一个完整调用后提前关闭，否则会截断同设备多动作。
 
                     # ── 结束处理 ──────────────────────────────────
                     if finish_reason == "stop":

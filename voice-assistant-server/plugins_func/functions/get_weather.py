@@ -43,6 +43,7 @@ HEADERS = {
         "(KHTML, like Gecko) Chrome/92.0.4515.107 Safari/537.36"
     )
 }
+HTTP_TIMEOUT = 10
 
 # 天气代码 https://dev.qweather.com/docs/resource/icons/#weather-icons
 WEATHER_CODE_MAP = {
@@ -113,7 +114,7 @@ WEATHER_CODE_MAP = {
 
 def fetch_city_info(location, api_key, api_host):
     url = f"https://{api_host}/geo/v2/city/lookup?key={api_key}&location={location}&lang=zh"
-    response = requests.get(url, headers=HEADERS).json()
+    response = requests.get(url, headers=HEADERS, timeout=HTTP_TIMEOUT).json()
     if response.get("error") is not None:
         logger.bind(tag=TAG).error(
             f"获取天气失败，原因：{response.get('error', {}).get('detail')}"
@@ -123,7 +124,7 @@ def fetch_city_info(location, api_key, api_host):
 
 
 def fetch_weather_page(url):
-    response = requests.get(url, headers=HEADERS)
+    response = requests.get(url, headers=HEADERS, timeout=HTTP_TIMEOUT)
     return BeautifulSoup(response.text, "html.parser") if response.ok else None
 
 

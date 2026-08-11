@@ -1,8 +1,8 @@
 // UI controller module
-import { loadConfig, saveConfig } from '../config/manager.js?v=0205';
-import { getAudioPlayer } from '../core/audio/player.js?v=0419';
-import { getAudioRecorder } from '../core/audio/recorder.js?v=0419';
-import { getWebSocketHandler } from '../core/network/websocket.js?v=0419';
+import { loadConfig, saveConfig } from '../config/manager.js';
+import { getAudioPlayer } from '../core/audio/player.js';
+import { getAudioRecorder } from '../core/audio/recorder.js';
+import { getWebSocketHandler } from '../core/network/websocket.js';
 
 // UI controller class
 class UIController {
@@ -11,8 +11,12 @@ class UIController {
         this.visualizerCanvas = null;
         this.visualizerContext = null;
         this.audioStatsTimer = null;
-        this.currentBackgroundIndex = localStorage.getItem('backgroundIndex') ? parseInt(localStorage.getItem('backgroundIndex')) : 3;
-        this.backgroundImages = ['1.png', '2.png', '3.png', '4.png'];
+        this.backgroundImages = ['1.png', '2.png', '3.png', '4.png', '5.png'];
+        const savedBackgroundIndex = parseInt(localStorage.getItem('backgroundIndex'), 10);
+        this.currentBackgroundIndex = Number.isInteger(savedBackgroundIndex) ? savedBackgroundIndex : 4;
+        if (this.currentBackgroundIndex < 0 || this.currentBackgroundIndex >= this.backgroundImages.length) {
+            this.currentBackgroundIndex = 4;
+        }
         this.dialBtnDisabled = false;
 
         // Bind methods
@@ -223,15 +227,6 @@ class UIController {
             });
         });
 
-        // Add MCP tool button
-        const addMCPToolBtn = document.getElementById('addMCPToolBtn');
-        if (addMCPToolBtn) {
-            addMCPToolBtn.addEventListener('click', (e) => {
-                e.stopPropagation();
-                this.addMCPTool();
-            });
-        }
-
         // Connect button and send button are not removed, can be added to dial button later
     }
 
@@ -350,7 +345,10 @@ class UIController {
 
         const messageDiv = document.createElement('div');
         messageDiv.className = `chat-message ${isUser ? 'user' : 'ai'}`;
-        messageDiv.innerHTML = `<div class="message-bubble">${content}</div>`;
+        const bubbleDiv = document.createElement('div');
+        bubbleDiv.className = 'message-bubble';
+        bubbleDiv.textContent = content;
+        messageDiv.appendChild(bubbleDiv);
         chatStream.appendChild(messageDiv);
 
         // Scroll to bottom
@@ -495,7 +493,7 @@ class UIController {
 
             if (isConnected) {
                 // Check microphone availability (check again after connection)
-                const { checkMicrophoneAvailability } = await import('../core/audio/recorder.js?v=0419');
+                const { checkMicrophoneAvailability } = await import('../core/audio/recorder.js');
                 const micAvailable = await checkMicrophoneAvailability();
 
                 if (!micAvailable) {
@@ -519,7 +517,7 @@ class UIController {
 
                 this.hideModal('settingsModal');
             } else {
-                throw new Error('OTA连接失败');
+                throw new Error(wsHandler.getLastErrorMessage() || 'OTA连接失败');
             }
         } catch (error) {
             console.error('Connection error details:', {
@@ -545,33 +543,6 @@ class UIController {
                 dialBtn.classList.remove('dial-active');
                 console.log('Dial button state restored successfully');
             }
-        }
-    }
-
-    // Add MCP tool
-    addMCPTool() {
-        const mcpToolsList = document.getElementById('mcpToolsList');
-        if (!mcpToolsList) return;
-
-        const toolId = `mcp-tool-${Date.now()}`;
-        const toolDiv = document.createElement('div');
-        toolDiv.className = 'properties-container';
-        toolDiv.innerHTML = `
-            <div class="property-item">
-                <input type="text" placeholder="工具名称" value="新工具">
-                <input type="text" placeholder="工具描述" value="工具描述">
-                <button class="remove-property" onclick="uiController.removeMCPTool('${toolId}')">删除</button>
-            </div>
-        `;
-
-        mcpToolsList.appendChild(toolDiv);
-    }
-
-    // Remove MCP tool
-    removeMCPTool(toolId) {
-        const toolElement = document.getElementById(toolId);
-        if (toolElement) {
-            toolElement.remove();
         }
     }
 

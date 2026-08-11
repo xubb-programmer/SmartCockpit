@@ -51,6 +51,7 @@ class LLMProvider(LLMProviderBase):
             headers={"Authorization": f"Bearer {self.api_key}"},
             json=request_json,
             stream=True,
+            timeout=(10, 120),
         ) as r:
             if self.mode == "chat-messages":
                 for line in r.iter_lines():

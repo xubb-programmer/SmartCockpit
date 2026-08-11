@@ -4,7 +4,7 @@ import sys
 import importlib
 
 from config.logger import setup_logging
-from core.utils.textUtils import check_emoji
+from core.utils.textUtils import check_emoji, remove_unspoken_symbols
 
 logger = setup_logging()
 
@@ -27,6 +27,10 @@ punctuation_set = {
     "]",  # 方括号
     "【",
     "】",  # 中文方括号
+    "(",
+    ")",
+    "（",
+    "）",  # 中英文圆括号
     "~",  # 波浪号
 }
 
@@ -135,6 +139,7 @@ class MarkdownCleaner:
 
         # 去除emoji表情
         text = check_emoji(text)
+        text = remove_unspoken_symbols(text)
 
         # 检查文本是否全为英文和基本标点符号
         if text and all((c.isascii() or c.isspace() or c in punctuation_set) for c in text):

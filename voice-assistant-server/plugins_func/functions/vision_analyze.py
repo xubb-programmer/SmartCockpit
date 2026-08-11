@@ -4,6 +4,8 @@ import os
 from config.logger import setup_logging
 from plugins_func.register import register_function, ToolType, Action, ActionResponse
 from core.utils.vllm import create_instance
+from core.utils import textUtils
+from core.utils.tts import MarkdownCleaner
 
 TAG = __name__
 logger = setup_logging()
@@ -53,6 +55,13 @@ def _convert_digits_for_tts(text):
     # 清理列表标号格式（如 "一." → ""）
     text = re.sub(r'^[一二三四五六七八九十]\.\s*', '', text, flags=re.MULTILINE)
     return text
+
+
+def _sanitize_result_for_tts(text):
+    """清理视觉模型返回文本，避免 Markdown、首尾符号进入 TTS/网页显示。"""
+    text = MarkdownCleaner.clean_markdown(str(text or ""))
+    text = _convert_digits_for_tts(text)
+    return textUtils.get_string_no_punctuation_or_emoji(text)
 
 vision_analyze_desc = {
     "type": "function",
@@ -149,8 +158,8 @@ def vision_analyze(conn, question=None):
             image_base64 = base64.b64encode(image_data).decode("utf-8")
             result = vllm.response(question, image_base64)
         
-        # TTS 兼容处理：阿拉伯数字转中文（Sherpa TTS 不支持数字）
-        result = _convert_digits_for_tts(result)
+        # TTS 兼容处理：清理 Markdown/首尾符号，并将阿拉伯数字转中文。
+        result = _sanitize_result_for_tts(result)
         
         # 直接返回给 TTS 播报
         return ActionResponse(action=Action.RESPONSE, result=result, response=result)

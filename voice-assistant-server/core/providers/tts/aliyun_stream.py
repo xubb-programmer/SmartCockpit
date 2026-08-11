@@ -75,7 +75,7 @@ class AccessToken:
 
         import requests
 
-        response = requests.get(full_url)
+        response = requests.get(full_url, timeout=10)
         if response.ok:
             root_obj = response.json()
             key = "Token"

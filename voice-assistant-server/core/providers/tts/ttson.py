@@ -65,7 +65,9 @@ class TTSProvider(TTSProviderBase):
             }
         )
 
-        resp = requests.request("POST", url, data=payload)
+        resp = requests.request(
+            "POST", url, data=payload, timeout=self.tts_timeout
+        )
         if resp.status_code != 200:
             logger.bind(tag=TAG).error(f"TTSON 请求失败: {resp.text}")
             raise Exception(f"{__name__}: TTS请求失败")
@@ -81,7 +83,7 @@ class TTSProvider(TTSProviderBase):
                 + resp_json["voice_path"]
             )
 
-            audio_content = requests.get(result)
+            audio_content = requests.get(result, timeout=self.tts_timeout)
             if output_file:
                 with open(output_file, "wb") as f:
                     f.write(audio_content.content)

@@ -38,6 +38,13 @@ EMOJI_RANGES = [
     (0x2700, 0x27BF),
 ]
 
+UNSPOKEN_SYMBOLS = {"(", ")", "（", "）"}
+
+
+def remove_unspoken_symbols(text):
+    """移除 TTS/显示中不需要读出的包装符号，保留符号内文字。"""
+    return "".join(char for char in text if char not in UNSPOKEN_SYMBOLS)
+
 
 def get_string_no_punctuation_or_emoji(s):
     """去除字符串首尾的空格、标点符号和表情符号"""
@@ -50,7 +57,7 @@ def get_string_no_punctuation_or_emoji(s):
     end = len(chars) - 1
     while end >= start and is_punctuation_or_emoji(chars[end]):
         end -= 1
-    return "".join(chars[start : end + 1])
+    return remove_unspoken_symbols("".join(chars[start : end + 1]))
 
 
 def is_punctuation_or_emoji(char):
@@ -75,6 +82,10 @@ def is_punctuation_or_emoji(char):
         "]",  # 方括号
         "【",
         "】",  # 中文方括号
+        "(",
+        ")",
+        "（",
+        "）",  # 中英文圆括号
     }
     if char.isspace() or char in punctuation_set:
         return True

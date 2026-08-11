@@ -52,7 +52,8 @@ class ASRProvider(ASRProviderBase):
                     self.api_url,
                     files=files,
                     data=data,
-                    headers=headers
+                    headers=headers,
+                    timeout=30,
                 )
                 logger.bind(tag=TAG).debug(
                     f"语音识别耗时: {time.time() - start_time:.3f}s | 结果: {response.text}"

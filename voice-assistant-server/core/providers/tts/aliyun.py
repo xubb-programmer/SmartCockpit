@@ -73,7 +73,7 @@ class AccessToken:
         )
         # print('url: %s' % full_url)
         # 提交HTTP GET请求
-        response = requests.get(full_url)
+        response = requests.get(full_url, timeout=10)
         if response.ok:
             root_obj = response.json()
             key = "Token"
@@ -189,12 +189,18 @@ class TTSProvider(TTSProviderBase):
         # print(self.api_url, json.dumps(request_json, ensure_ascii=False))
         try:
             resp = requests.post(
-                self.api_url, json.dumps(request_json), headers=self.header
+                self.api_url,
+                json.dumps(request_json),
+                headers=self.header,
+                timeout=self.tts_timeout,
             )
             if resp.status_code == 401:  # Token过期特殊处理
                 self._refresh_token()
                 resp = requests.post(
-                    self.api_url, json.dumps(request_json), headers=self.header
+                    self.api_url,
+                    json.dumps(request_json),
+                    headers=self.header,
+                    timeout=self.tts_timeout,
                 )
             # 检查返回请求数据的mime类型是否是audio/***，是则保存到指定路径下；返回的是binary格式的
             if resp.headers["Content-Type"].startswith("audio/"):

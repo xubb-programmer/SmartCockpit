@@ -18,10 +18,5 @@
         console.error('背景图片加载失败:', bgImageUrl);
     };
 
-    // 加载成功显示模型加载
-    bgImage.onload = function() {
-        modelLoading.style.display = 'flex';
-    };
-
     bgImage.src = bgImageUrl;
 })();

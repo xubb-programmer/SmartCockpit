@@ -1,16 +1,31 @@
 // WebSocket消息处理模块
-import { getConfig, saveConnectionUrls } from '../../config/manager.js?v=0205';
-import { uiController } from '../../ui/controller.js?v=0419';
-import { log } from '../../utils/logger.js?v=0205';
-import { getAudioPlayer } from '../audio/player.js?v=0419';
-import { getAudioRecorder } from '../audio/recorder.js?v=0419';
-import { executeMcpTool, getMcpTools, setWebSocket as setMcpWebSocket } from '../mcp/tools.js?v=0418';
-import { webSocketConnect } from './ota-connector.js?v=0205';
+import { getConfig, saveConnectionUrls } from '../../config/manager.js';
+import { uiController } from '../../ui/controller.js';
+import { log } from '../../utils/logger.js';
+import { getAudioPlayer } from '../audio/player.js';
+import { getAudioRecorder } from '../audio/recorder.js';
+import { executeMcpTool, getMcpTools, setWebSocket as setMcpWebSocket } from '../mcp/tools.js';
+import { webSocketConnect } from './ota-connector.js';
+
+function getWebSocketErrorMessage(error, websocket) {
+    if (error && error.message) {
+        return error.message;
+    }
+
+    const wsUrl = websocket?.url || document.getElementById('serverUrl')?.value || '';
+    if (wsUrl.startsWith('wss://')) {
+        return 'WSS连接失败：当前HTTPS证书未被系统或浏览器信任。清除浏览器数据后临时信任会失效，请将 .ssl/cert.pem 导入受信任根证书，或使用正式证书。';
+    }
+
+    return '未知错误';
+}
 
 // WebSocket处理器类
 export class WebSocketHandler {
     constructor() {
         this.websocket = null;
+        this.isConnecting = false;
+        this.lastErrorMessage = '';
         this.onConnectionStateChange = null;
         this.onRecordButtonStateChange = null;
         this.onSessionStateChange = null;
@@ -392,6 +407,7 @@ export class WebSocketHandler {
     // 连接WebSocket服务器
     async connect() {
         const config = getConfig();
+        this.lastErrorMessage = '';
         log('正在检查OTA状态...', 'info');
         saveConnectionUrls();
 
@@ -413,16 +429,78 @@ export class WebSocketHandler {
             const audioRecorder = getAudioRecorder();
             audioRecorder.setWebSocket(this.websocket);
 
+            this.isConnecting = true;
             this.setupEventHandlers();
+            const opened = await this.waitForOpen();
+            this.isConnecting = false;
+
+            if (!opened) {
+                if (this.websocket && this.websocket.readyState !== WebSocket.CLOSED) {
+                    this.websocket.close();
+                }
+                return false;
+            }
 
             return true;
         } catch (error) {
+            this.isConnecting = false;
+            this.lastErrorMessage = error.message || '连接错误';
             log(`连接错误: ${error.message}`, 'error');
             if (this.onConnectionStateChange) {
                 this.onConnectionStateChange(false);
             }
             return false;
         }
+    }
+
+    waitForOpen(timeoutMs = 10000) {
+        if (!this.websocket) return Promise.resolve(false);
+        if (this.websocket.readyState === WebSocket.OPEN) return Promise.resolve(true);
+        if (this.websocket.readyState === WebSocket.CLOSING || this.websocket.readyState === WebSocket.CLOSED) {
+            return Promise.resolve(false);
+        }
+
+        return new Promise(resolve => {
+            let settled = false;
+            let timeoutId = null;
+
+            const cleanup = () => {
+                clearTimeout(timeoutId);
+                this.websocket.removeEventListener('open', onOpen);
+                this.websocket.removeEventListener('error', onError);
+                this.websocket.removeEventListener('close', onClose);
+            };
+            const resolveOnce = (result) => {
+                if (settled) return;
+                settled = true;
+                cleanup();
+                resolve(result);
+            };
+            const onOpen = () => resolveOnce(true);
+            const onError = (event) => {
+                this.lastErrorMessage = getWebSocketErrorMessage(event, this.websocket);
+                resolveOnce(false);
+            };
+            const onClose = () => {
+                if (!this.lastErrorMessage) {
+                    this.lastErrorMessage = 'WebSocket连接已关闭';
+                }
+                resolveOnce(false);
+            };
+
+            timeoutId = setTimeout(() => {
+                this.lastErrorMessage = 'WebSocket连接超时';
+                resolveOnce(false);
+            }, timeoutMs);
+
+            this.websocket.addEventListener('open', onOpen);
+            this.websocket.addEventListener('error', onError);
+            this.websocket.addEventListener('close', onClose);
+        });
+    }
+
+    getLastErrorMessage() {
+        return this.lastErrorMessage;
     }
 
     // 设置事件处理器
@@ -460,8 +538,12 @@ export class WebSocketHandler {
         };
 
         this.websocket.onerror = (error) => {
-            log(`WebSocket错误: ${error.message || '未知错误'}`, 'error');
-            uiController.addChatMessage(`⚠️ WebSocket错误: ${error.message || '未知错误'}`, false);
+            const errorMessage = getWebSocketErrorMessage(error, this.websocket);
+            this.lastErrorMessage = errorMessage;
+            log(`WebSocket错误: ${errorMessage}`, 'error');
+            if (!this.isConnecting) {
+                uiController.addChatMessage(`⚠️ WebSocket错误: ${errorMessage}`, false);
+            }
             if (this.onConnectionStateChange) {
                 this.onConnectionStateChange(false);
             }

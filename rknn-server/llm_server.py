@@ -455,8 +455,8 @@ if __name__ == "__main__":
             sys.exit(1)
 
     # Fix frequency
-    command = "sudo bash scripts/fix_freq_{}.sh".format(args.target_platform)
-    subprocess.run(command, shell=True)
+    command = ["sudo", "bash", f"scripts/fix_freq_{args.target_platform}.sh"]
+    subprocess.run(command)
 
     # Set resource limit (Linux only)
     if resource is not None:

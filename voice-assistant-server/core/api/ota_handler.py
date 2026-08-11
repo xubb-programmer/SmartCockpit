@@ -15,10 +15,32 @@ from core.api.base_handler import BaseHandler
 
 TAG = __name__
 
+_VEHICLE_PROFILE_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
 
 def _safe_basename(filename: str) -> str:
     # Prevent directory traversal
     return os.path.basename(filename)
+
+
+def _is_safe_vehicle_profile_id(profile_id: str) -> bool:
+    return bool(_VEHICLE_PROFILE_ID_RE.fullmatch(profile_id or ""))
+
+
+def _resolve_vehicle_profile_path(profile_id: str) -> Tuple[str, str]:
+    if not _is_safe_vehicle_profile_id(profile_id):
+        raise ValueError("invalid profile_id")
+
+    profiles_dir = os.path.realpath(
+        os.path.join(os.getcwd(), "data", "vehicle_profiles")
+    )
+    profile_path = os.path.realpath(os.path.join(profiles_dir, f"{profile_id}.yaml"))
+    try:
+        if os.path.commonpath([profiles_dir, profile_path]) != profiles_dir:
+            raise ValueError("invalid profile path")
+    except ValueError:
+        raise ValueError("invalid profile path")
+    return profiles_dir, profile_path
 
 
 def _parse_version(ver: str) -> Tuple[int, ...]:
@@ -167,6 +189,21 @@ class OTAHandler(BaseHandler):
             else:
                 raise Exception("OTA请求ClientID为空")
 
+            if self.auth_enable and self.allowed_devices and device_id not in self.allowed_devices:
+                self.logger.bind(tag=TAG).warning(
+                    f"OTA credential request rejected for non-allowlisted device: {device_id}"
+                )
+                response = web.Response(
+                    text=json.dumps(
+                        {"success": False, "message": "device not allowed."},
+                        separators=(",", ":"),
+                    ),
+                    content_type="application/json",
+                    status=403,
+                )
+                self._add_cors_headers(response)
+                return response
+
             data_json = {}
             try:
                 data_json = json.loads(data) if data else {}
@@ -282,12 +319,8 @@ class OTAHandler(BaseHandler):
             else:  # 未配置 mqtt_gateway，下发 WebSocket
                 # 如果开启了认证，则进行认证校验
                 token = ""
-                if self.auth_enable:
-                    if self.allowed_devices:
-                        if device_id not in self.allowed_devices:
-                            token = self.auth.generate_token(client_id, device_id)
-                    else:
-                        token = self.auth.generate_token(client_id, device_id)
+                if self.auth_enable and not self.allowed_devices:
+                    token = self.auth.generate_token(client_id, device_id)
                 # NOTE: use websocket_port here
                 return_json["websocket"] = {
                     "url": self._get_websocket_url(local_ip, websocket_port),
@@ -423,6 +456,8 @@ class OTAHandler(BaseHandler):
                     if not fname.endswith(".yaml"):
                         continue
                     profile_id = fname[:-5]  # 去掉 .yaml
+                    if not _is_safe_vehicle_profile_id(profile_id):
+                        continue
                     try:
                         with open(os.path.join(profiles_dir, fname), "r", encoding="utf-8") as f:
                             data = yaml.safe_load(f) or {}
@@ -456,8 +491,7 @@ class OTAHandler(BaseHandler):
                 raise ValueError("profile_id 不能为空")
 
             # 校验 profile 文件存在
-            profiles_dir = os.path.join(os.getcwd(), "data", "vehicle_profiles")
-            profile_path = os.path.join(profiles_dir, f"{profile_id}.yaml")
+            profiles_dir, profile_path = _resolve_vehicle_profile_path(profile_id)
             if not os.path.exists(profile_path):
                 raise FileNotFoundError(f"车型配置文件不存在: {profile_id}.yaml")
 
@@ -523,9 +557,7 @@ class OTAHandler(BaseHandler):
                 self._add_cors_headers(resp)
                 return resp
 
-            profile_path = os.path.join(
-                os.getcwd(), "data", "vehicle_profiles", f"{profile_name}.yaml"
-            )
+            _, profile_path = _resolve_vehicle_profile_path(profile_name)
             if not os.path.exists(profile_path):
                 resp = web.Response(
                     text=json.dumps({"error": f"配置文件不存在: {profile_name}"}, ensure_ascii=False),

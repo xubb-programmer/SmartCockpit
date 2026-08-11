@@ -18,6 +18,9 @@ PRE_BUFFER_COUNT = 5
 
 
 async def sendAudioMessage(conn: "ConnectionHandler", sentenceType, audios, text, sentence_id=None):
+    if isinstance(text, str):
+        text = textUtils.remove_unspoken_symbols(text)
+
     # 跳过旧句子残留音频
     if sentence_id is not None and sentence_id != conn.sentence_id:
         return
@@ -269,7 +272,7 @@ async def send_tts_message(conn: "ConnectionHandler", state, text=None):
         return
     message = {"type": "tts", "state": state, "session_id": conn.session_id}
     if text is not None:
-        message["text"] = textUtils.check_emoji(text)
+        message["text"] = textUtils.remove_unspoken_symbols(textUtils.check_emoji(text))
 
     # TTS播放结束
     if state == "stop":

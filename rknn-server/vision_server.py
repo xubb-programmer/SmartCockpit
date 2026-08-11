@@ -256,7 +256,16 @@ ALLOWED_IMAGE_DIRS = ["/tmp", "/data/images", "/var/tmp"]
 def _is_path_allowed(path):
     """检查路径是否在白名单目录内"""
     real_path = os.path.realpath(path)
-    return any(real_path.startswith(os.path.realpath(d)) for d in ALLOWED_IMAGE_DIRS)
+    for allowed_dir in ALLOWED_IMAGE_DIRS:
+        if not allowed_dir:
+            continue
+        allowed_real = os.path.realpath(allowed_dir)
+        try:
+            if os.path.commonpath([allowed_real, real_path]) == allowed_real:
+                return True
+        except ValueError:
+            continue
+    return False
 
 
 @app.route('/vision/analyze', methods=['POST'])

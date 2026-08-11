@@ -5,6 +5,12 @@
 # 运行环境：RK3588 (10.100.25.56)
 # ============================================================
 
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+HOME_DIR="$(cd "${SCRIPT_DIR}/../../.." && pwd)"
+RKLLM_SERVER_DIR="${HOME_DIR}/rknn-server"
+VOICE_ASSISTANT_DIR="${HOME_DIR}/voice-assistant-server"
+WEB_DIR="${VOICE_ASSISTANT_DIR}/web"
+
 RKLLM_PID_FILE="/tmp/rkllm_server.pid"
 VISION_PID_FILE="/tmp/vision_server.pid"
 VOICE_ASSISTANT_PID_FILE="/tmp/voice_assistant_server.pid"
@@ -36,6 +42,26 @@ wait_for_exit() {
     echo; return 1
 }
 
+find_pids_by_command() {
+    local script_pattern=$1 expected_path=$2 expected_cwd=$3
+    local candidate cmdline cwd
+
+    pgrep -f "${script_pattern}" 2>/dev/null | while read -r candidate; do
+        [ "${candidate}" = "$$" ] && continue
+        cmdline=$(tr '\0' ' ' < "/proc/${candidate}/cmdline" 2>/dev/null || true)
+        cwd=$(readlink -f "/proc/${candidate}/cwd" 2>/dev/null || true)
+
+        if [ -n "${expected_path}" ] && [[ "${cmdline}" == *"${expected_path}"* ]]; then
+            echo "${candidate}"
+            continue
+        fi
+
+        if [ -n "${expected_cwd}" ] && [ "${cwd}" = "${expected_cwd}" ] && [[ "${cmdline}" =~ ${script_pattern} ]]; then
+            echo "${candidate}"
+        fi
+    done
+}
+
 # 通用停止函数：SIGTERM → 等待 → SIGKILL
 stop_process() {
     local name=$1 pid_file=$2 normal_timeout=$3 force=$4
@@ -45,10 +71,10 @@ stop_process() {
         pid=$(cat "${pid_file}")
     fi
 
-    # PID 文件不存在或进程已死，尝试按名字查找兜底
+    # PID 文件不存在或进程已死，按脚本名和项目路径查找兜底
     if [ -z "${pid}" ] || ! kill -0 "${pid}" 2>/dev/null; then
-        local pattern=$5   # 第5个参数：grep 进程名模式
-        pid=$(pgrep -f "${pattern}" 2>/dev/null | head -1 || true)
+        local script_pattern=$5 expected_path=$6 expected_cwd=$7
+        pid=$(find_pids_by_command "${script_pattern}" "${expected_path}" "${expected_cwd}" | head -1 || true)
         if [ -z "${pid}" ]; then
             info "${name} 未在运行，跳过"
             rm -f "${pid_file}"
@@ -81,32 +107,32 @@ stop_process() {
 # 1. 先停 voice-assistant-server（应用层）
 # ================================================================
 section "停止 voice-assistant-server"
-stop_process "voice-assistant-server" "${VOICE_ASSISTANT_PID_FILE}" 10 5 "app.py"
+stop_process "voice-assistant-server" "${VOICE_ASSISTANT_PID_FILE}" 10 5 "app.py" "${VOICE_ASSISTANT_DIR}/app.py" "${VOICE_ASSISTANT_DIR}"
 
 # ================================================================
 # 2. 停止 Web 客户端 HTTP 服务
 # ================================================================
 section "停止 Web 客户端 HTTP 服务"
-stop_process "Web HTTP服务" "${WEB_HTTP_PID_FILE}" 5 3 "http_server.py"
+stop_process "Web HTTP服务" "${WEB_HTTP_PID_FILE}" 5 3 "http_server.py" "${WEB_DIR}/http_server.py" "${VOICE_ASSISTANT_DIR}"
 
 # ================================================================
 # 2b. 停止 Web 客户端 HTTPS/WSS 网关
 # ================================================================
 section "停止 Web 客户端 HTTPS/WSS 网关"
-stop_process "Web HTTPS/WSS网关" "${WEB_HTTPS_PID_FILE}" 5 3 "https_gateway.py|https_server.py"
+stop_process "Web HTTPS/WSS网关" "${WEB_HTTPS_PID_FILE}" 5 3 "https_gateway.py|https_server.py" "${WEB_DIR}/https_gateway.py" "${VOICE_ASSISTANT_DIR}"
 
 # ================================================================
 # 3. 停止视觉分析服务
 # ================================================================
 section "停止视觉分析服务"
-stop_process "视觉服务" "${VISION_PID_FILE}" 15 5 "vision_server.py"
+stop_process "视觉服务" "${VISION_PID_FILE}" 15 5 "vision_server.py" "${RKLLM_SERVER_DIR}/vision_server.py" "${RKLLM_SERVER_DIR}"
 
 # ================================================================
 # 4. 再停 RKLLM Server（让 rkllm_model.release() 释放 NPU 资源）
 # ================================================================
 section "停止 RKLLM Server 并释放 NPU 资源"
 # 给 llm_server 更长的正常退出时间（rkllm_model.release() 需要时间）
-stop_process "RKLLM Server" "${RKLLM_PID_FILE}" 20 5 "llm_server.py"
+stop_process "RKLLM Server" "${RKLLM_PID_FILE}" 20 5 "llm_server.py" "${RKLLM_SERVER_DIR}/llm_server.py" "${RKLLM_SERVER_DIR}"
 
 # ================================================================
 # 4. 验证资源已释放
@@ -121,9 +147,9 @@ else
 fi
 
 # 检查残留 python 进程（兜底清理）
-LEFTOVER_RKLLM=$(pgrep -f "llm_server.py" 2>/dev/null || true)
-LEFTOVER_VISION=$(pgrep -f "vision_server.py" 2>/dev/null || true)
-LEFTOVER_VOICE_ASSISTANT=$(pgrep -f "voice_assistant.*app.py" 2>/dev/null || true)
+LEFTOVER_RKLLM=$(find_pids_by_command "llm_server.py" "${RKLLM_SERVER_DIR}/llm_server.py" "${RKLLM_SERVER_DIR}" || true)
+LEFTOVER_VISION=$(find_pids_by_command "vision_server.py" "${RKLLM_SERVER_DIR}/vision_server.py" "${RKLLM_SERVER_DIR}" || true)
+LEFTOVER_VOICE_ASSISTANT=$(find_pids_by_command "app.py" "${VOICE_ASSISTANT_DIR}/app.py" "${VOICE_ASSISTANT_DIR}" || true)
 if [ -n "${LEFTOVER_RKLLM}" ] || [ -n "${LEFTOVER_VISION}" ] || [ -n "${LEFTOVER_VOICE_ASSISTANT}" ]; then
     warn "发现残留进程，强制清理: ${LEFTOVER_RKLLM} ${LEFTOVER_VISION} ${LEFTOVER_VOICE_ASSISTANT}"
     kill -KILL ${LEFTOVER_RKLLM} ${LEFTOVER_VISION} ${LEFTOVER_VOICE_ASSISTANT} 2>/dev/null || true
