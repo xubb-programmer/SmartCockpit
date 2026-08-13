@@ -80,7 +80,10 @@ class TTSProvider(TTSProviderBase):
     async def text_to_speak(self, text, output_file):
         try:
             import numpy as np
-            
+
+            logger.bind(tag=TAG).info(
+                f"[音频诊断][TTS合成] 输入文本={text!r}"
+            )
             # 使用 Sherpa-ONNX 生成音频
             audio = self.tts.generate(text, sid=self.sid, speed=self.speed)
             
@@ -91,6 +94,10 @@ class TTSProvider(TTSProviderBase):
             # 将 float32 类型的音频样本(-1.0 到 1.0) 转换为 int16 格式 PCM
             samples_int16 = (np.array(audio.samples) * 32767).astype(np.int16)
             pcm_bytes = samples_int16.tobytes()
+            logger.bind(tag=TAG).info(
+                f"[音频诊断][TTS合成] 生成样本={len(samples_int16)}，"
+                f"采样率={self.sample_rate}Hz，时长={len(samples_int16) / self.sample_rate:.3f}秒"
+            )
 
             if output_file:
                 # 写入到 WAV 文件

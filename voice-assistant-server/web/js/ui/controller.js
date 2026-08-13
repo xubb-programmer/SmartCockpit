@@ -53,6 +53,9 @@ class UIController {
         audioRecorder.onRecordingStart = (seconds) => {
             this.updateRecordButtonState(true, seconds);
         };
+        audioRecorder.onRecordingStop = () => {
+            this.updateRecordButtonState(false);
+        };
 
         // Initialize status display
         this.updateConnectionUI(false);
@@ -90,8 +93,31 @@ class UIController {
         }
     }
 
+    // 浏览器要求在用户操作中恢复 AudioContext，否则 HTTPS 页面可能保持静音。
+    unlockAudioOutput() {
+        const audioContext = getAudioPlayer().getAudioContext();
+        if (audioContext.state !== 'suspended') return;
+
+        audioContext.resume()
+            .then(() => {
+                console.log('音频输出已解锁，AudioContext 状态:', audioContext.state);
+            })
+            .catch((error) => {
+                console.warn('恢复音频输出失败:', error);
+            });
+    }
+
     // Initialize event listeners
     initEventListeners() {
+        // 任意用户点击或键盘操作都可解除浏览器自动播放限制。
+        document.addEventListener('pointerdown', () => this.unlockAudioOutput(), {
+            capture: true,
+            passive: true
+        });
+        document.addEventListener('keydown', () => this.unlockAudioOutput(), {
+            capture: true
+        });
+
         // Settings button
         const settingsBtn = document.getElementById('settingsBtn');
         if (settingsBtn) {
@@ -112,6 +138,7 @@ class UIController {
         const dialBtn = document.getElementById('dialBtn');
         if (dialBtn) {
             dialBtn.addEventListener('click', () => {
+                this.unlockAudioOutput();
                 dialBtn.disabled = true;
                 this.dialBtnDisabled = true;
                 setTimeout(() => {
@@ -147,30 +174,27 @@ class UIController {
         // Record button
         const recordBtn = document.getElementById('recordBtn');
         if (recordBtn) {
-            let recordTimer = null;
-            recordBtn.addEventListener('click', () => {
-                if (recordTimer) {
-                    clearTimeout(recordTimer);
-                    recordTimer = null;
-                }
-                recordTimer = setTimeout(() => {
+            let recordOperationPending = false;
+            recordBtn.addEventListener('click', async () => {
+                if (recordOperationPending) return;
+                this.unlockAudioOutput();
+                recordOperationPending = true;
+                recordBtn.disabled = true;
+                try {
                     const audioRecorder = getAudioRecorder();
                     if (audioRecorder.isRecording) {
-                        audioRecorder.stop();
-                        // Restore record button to normal state
-                        recordBtn.classList.remove('recording');
-                        recordBtn.querySelector('.btn-text').textContent = '录音';
+                        await audioRecorder.stop();
                     } else {
-                        // Update button state to recording
-                        recordBtn.classList.add('recording');
-                        recordBtn.querySelector('.btn-text').textContent = '录音中';
-
-                        // Start recording, update button state after delay
-                        setTimeout(() => {
-                            audioRecorder.start();
-                        }, 100);
+                        const started = await audioRecorder.start();
+                        if (!started) {
+                            this.updateRecordButtonState(false);
+                            this.addChatMessage('麦克风启动失败，请查看音频诊断日志', false);
+                        }
                     }
-                }, 300);
+                } finally {
+                    recordOperationPending = false;
+                    recordBtn.disabled = window.microphoneAvailable === false;
+                }
             });
         }
 

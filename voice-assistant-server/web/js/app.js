@@ -1,10 +1,10 @@
 // 主应用入口
 import { checkOpusLoaded, initOpusEncoder } from './core/audio/opus-codec.js';
 import { getAudioPlayer } from './core/audio/player.js';
-import { checkMicrophoneAvailability, isHttpNonLocalhost } from './core/audio/recorder.js';
+import { checkMicrophoneAvailability, getAudioRecorder, isHttpNonLocalhost } from './core/audio/recorder.js';
 import { initMcpTools } from './core/mcp/tools.js';
 import { uiController } from './ui/controller.js';
-import { videoUIController } from './ui/video-controller.js?v=0812c';
+import { videoUIController } from './ui/video-controller.js';
 import { log } from './utils/logger.js';
 
 // 应用类
@@ -28,6 +28,10 @@ class App {
         // 初始化音频播放器
         this.audioPlayer = getAudioPlayer();
         await this.audioPlayer.start();
+        window.getAudioDiagnostics = () => ({
+            microphone: getAudioRecorder().getAudioStats(),
+            playback: this.audioPlayer.getAudioStats()
+        });
         // 初始化MCP工具
         initMcpTools();
         // 检查麦克风可用性

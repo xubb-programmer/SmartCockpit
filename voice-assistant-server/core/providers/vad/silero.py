@@ -73,6 +73,8 @@ class VADProvider(VADProviderBase):
 
                 audio_int16 = np.frombuffer(chunk, dtype=np.int16)
                 audio_float32 = audio_int16.astype(np.float32) / 32768.0
+                pcm_rms = float(np.sqrt(np.mean(np.square(audio_float32))))
+                pcm_peak = float(np.max(np.abs(audio_float32)))
                 audio_input = np.concatenate(
                     [conn._vad_context, audio_float32.reshape(1, -1)], axis=1
                 ).astype(np.float32)
@@ -96,6 +98,7 @@ class VADProvider(VADProviderBase):
                 else:
                     is_voice = conn.last_is_voice
 
+                previous_is_voice = conn.last_is_voice
                 # 声音没低于最低值则延续前一个状态，判断为有声音
                 conn.last_is_voice = is_voice
 
@@ -104,6 +107,19 @@ class VADProvider(VADProviderBase):
                 client_have_voice = (
                     conn.client_voice_window.count(True) >= self.frame_window_threshold
                 )
+
+                conn.vad_pcm_chunks = getattr(conn, "vad_pcm_chunks", 0) + 1
+                conn.vad_pcm_peak = max(getattr(conn, "vad_pcm_peak", 0.0), pcm_peak)
+                if (
+                    conn.vad_pcm_chunks == 1
+                    or conn.vad_pcm_chunks % 1000 == 0
+                    or previous_is_voice != is_voice
+                ):
+                    logger.bind(tag=TAG).info(
+                        f"[音频诊断][VAD] PCM块={conn.vad_pcm_chunks}，"
+                        f"RMS={pcm_rms:.4f}，峰值={pcm_peak:.4f}，"
+                        f"语音概率={speech_prob:.3f}，判定={'有声' if is_voice else '静音'}"
+                    )
 
                 # 如果之前有声音，但本次没有声音，且与上次有声音的时间差已经超过了静默阈值，则认为已经说完一句话
                 if conn.client_have_voice and not client_have_voice:

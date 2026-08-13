@@ -1,0 +1,4 @@
+#!/bin/sh
+# RK3588 的全局 GL4ES 缺少 TigerVNC 所需符号，XRDP 会话固定使用 Mesa libGL。
+export LD_LIBRARY_PATH="/usr/lib/aarch64-linux-gnu${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+exec /usr/bin/Xvnc "$@"

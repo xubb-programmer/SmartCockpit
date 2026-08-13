@@ -88,6 +88,7 @@ tts_audio_send_delay: 0
 
 exit_commands:
   - "退出"
+  - "关闭"
 
 voice_assistant:
   type: hello

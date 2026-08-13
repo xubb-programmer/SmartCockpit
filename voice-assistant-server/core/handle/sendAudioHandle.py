@@ -261,6 +261,14 @@ async def _do_send_audio(conn: "ConnectionHandler", opus_packet, flow_control):
         # 直接发送opus数据包
         await conn.websocket.send(opus_packet)
 
+    conn.tts_tx_packets = getattr(conn, "tts_tx_packets", 0) + 1
+    conn.tts_tx_bytes = getattr(conn, "tts_tx_bytes", 0) + len(opus_packet)
+    if conn.tts_tx_packets == 1 or conn.tts_tx_packets % 20 == 0:
+        conn.logger.bind(tag=TAG).info(
+            f"[音频诊断][下行] TTS已发送={conn.tts_tx_packets}帧/"
+            f"{conn.tts_tx_bytes}字节，当前帧={len(opus_packet)}字节"
+        )
+
     # 更新流控状态
     flow_control["packet_count"] = packet_index + 1
     flow_control["sequence"] = sequence + 1
@@ -273,6 +281,11 @@ async def send_tts_message(conn: "ConnectionHandler", state, text=None):
     message = {"type": "tts", "state": state, "session_id": conn.session_id}
     if text is not None:
         message["text"] = textUtils.remove_unspoken_symbols(textUtils.check_emoji(text))
+
+    if state == "start":
+        conn.tts_tx_packets = 0
+        conn.tts_tx_bytes = 0
+        conn.logger.bind(tag=TAG).info("[音频诊断][下行] TTS流开始")
 
     # TTS播放结束
     if state == "stop":
@@ -297,6 +310,11 @@ async def send_tts_message(conn: "ConnectionHandler", state, text=None):
         if hasattr(conn, "audio_rate_controller") and conn.audio_rate_controller:
             conn.audio_rate_controller.stop_sending()
         conn.clearSpeakStatus()
+        conn.logger.bind(tag=TAG).info(
+            f"[音频诊断][下行] TTS传输结束，共发送="
+            f"{getattr(conn, 'tts_tx_packets', 0)}帧/"
+            f"{getattr(conn, 'tts_tx_bytes', 0)}字节"
+        )
 
     # 发送消息到客户端
     await conn.websocket.send(json.dumps(message))

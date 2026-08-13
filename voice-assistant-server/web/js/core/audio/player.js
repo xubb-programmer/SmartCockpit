@@ -1,38 +1,72 @@
-// 音频播放模块
-import BlockingQueue from '../../utils/blocking-queue.js';
+// Audio playback module
 import { log } from '../../utils/logger.js';
-import { createStreamingContext } from './stream-context.js';
 
-// 音频播放器类
+const INITIAL_BUFFER_PACKETS = 3;
+const START_DELAY_SECONDS = 0.03;
+
 export class AudioPlayer {
     constructor() {
-        // 音频参数
+        // Opus can resample while decoding. Keeping the browser side at 16 kHz also
+        // lets the recorder safely share this user-unlocked AudioContext.
         this.SAMPLE_RATE = 16000;
         this.CHANNELS = 1;
         this.FRAME_SIZE = 960;
-        this.MIN_AUDIO_DURATION = 0.12;
 
-        // 状态
         this.audioContext = null;
+        this.analyser = null;
         this.opusDecoder = null;
-        this.streamingContext = null;
-        this.queue = new BlockingQueue();
-        this.isPlaying = false;
+        this.pendingPcmChunks = [];
+        this.pendingSamples = 0;
+        this.activeSources = new Set();
+        this.nextStartTime = 0;
+        this.playbackStarted = false;
+        this.streamActive = false;
+        this.streamEnded = true;
+        this.streamSequence = 0;
+        this.completionPromise = Promise.resolve();
+        this.resolveCompletion = null;
+        this.stats = this.createEmptyStats();
     }
 
-    // 获取或创建AudioContext
+    createEmptyStats() {
+        return {
+            receivedPackets: 0,
+            receivedBytes: 0,
+            decodedPackets: 0,
+            decodedSamples: 0,
+            decodeErrors: 0,
+            peak: 0,
+            rms: 0,
+            scheduledChunks: 0,
+            scheduledSamples: 0,
+            completedChunks: 0,
+            completedSamples: 0
+        };
+    }
+
     getAudioContext() {
-        if (!this.audioContext) {
+        if (!this.audioContext || this.audioContext.state === 'closed') {
             this.audioContext = new (window.AudioContext || window.webkitAudioContext)({
                 sampleRate: this.SAMPLE_RATE,
                 latencyHint: 'interactive'
             });
-            log('创建音频上下文，采样率: ' + this.SAMPLE_RATE + 'Hz', 'debug');
+            this.analyser = this.audioContext.createAnalyser();
+            this.analyser.fftSize = 256;
+            this.analyser.connect(this.audioContext.destination);
+            log(`[音频诊断][播放] AudioContext已创建，请求采样率=${this.SAMPLE_RATE}Hz，实际采样率=${this.audioContext.sampleRate}Hz，状态=${this.audioContext.state}`, 'info');
         }
         return this.audioContext;
     }
 
-    // 初始化Opus解码器
+    async resume() {
+        const audioContext = this.getAudioContext();
+        if (audioContext.state === 'suspended') {
+            await audioContext.resume();
+        }
+        log(`[音频诊断][播放] AudioContext状态=${audioContext.state}，实际采样率=${audioContext.sampleRate}Hz`, audioContext.state === 'running' ? 'success' : 'warning');
+        return audioContext.state === 'running';
+    }
+
     async initOpusDecoder() {
         if (this.opusDecoder) return this.opusDecoder;
 
@@ -40,14 +74,12 @@ export class AudioPlayer {
             if (typeof window.ModuleInstance === 'undefined') {
                 if (typeof Module !== 'undefined') {
                     window.ModuleInstance = Module;
-                    log('使用全局Module作为ModuleInstance', 'info');
                 } else {
-                    throw new Error('Opus库未加载，ModuleInstance和Module对象都不存在');
+                    throw new Error('Opus库未加载');
                 }
             }
 
             const mod = window.ModuleInstance;
-
             this.opusDecoder = {
                 channels: this.CHANNELS,
                 rate: this.SAMPLE_RATE,
@@ -55,47 +87,35 @@ export class AudioPlayer {
                 module: mod,
                 decoderPtr: null,
 
-                init: function () {
+                init() {
                     if (this.decoderPtr) return true;
-
                     const decoderSize = mod._opus_decoder_get_size(this.channels);
-                    log(`Opus解码器大小: ${decoderSize}字节`, 'debug');
-
                     this.decoderPtr = mod._malloc(decoderSize);
-                    if (!this.decoderPtr) {
-                        throw new Error("无法分配解码器内存");
-                    }
+                    if (!this.decoderPtr) throw new Error('无法分配Opus解码器内存');
 
-                    const err = mod._opus_decoder_init(
+                    const result = mod._opus_decoder_init(
                         this.decoderPtr,
                         this.rate,
                         this.channels
                     );
-
-                    if (err < 0) {
+                    if (result < 0) {
                         this.destroy();
-                        throw new Error(`Opus解码器初始化失败: ${err}`);
+                        throw new Error(`Opus解码器初始化失败: ${result}`);
                     }
-
-                    log("Opus解码器初始化成功", 'success');
                     return true;
                 },
 
-                decode: function (opusData) {
-                    if (!this.decoderPtr) {
-                        if (!this.init()) {
-                            throw new Error("解码器未初始化且无法初始化");
-                        }
-                    }
+                decode(opusData) {
+                    if (!this.decoderPtr) this.init();
 
+                    let opusPtr = 0;
+                    let pcmPtr = 0;
                     try {
-                        const mod = this.module;
+                        opusPtr = mod._malloc(opusData.length);
+                        pcmPtr = mod._malloc(this.frameSize * this.channels * 2);
+                        if (!opusPtr || !pcmPtr) throw new Error('无法分配Opus解码缓冲区');
 
-                        const opusPtr = mod._malloc(opusData.length);
                         mod.HEAPU8.set(opusData, opusPtr);
-
-                        const pcmPtr = mod._malloc(this.frameSize * 2);
-
                         const decodedSamples = mod._opus_decode(
                             this.decoderPtr,
                             opusPtr,
@@ -104,29 +124,23 @@ export class AudioPlayer {
                             this.frameSize,
                             0
                         );
-
                         if (decodedSamples < 0) {
-                            mod._free(opusPtr);
-                            mod._free(pcmPtr);
                             throw new Error(`Opus解码失败: ${decodedSamples}`);
                         }
 
                         const decodedData = new Int16Array(decodedSamples);
-                        for (let i = 0; i < decodedSamples; i++) {
-                            decodedData[i] = mod.HEAP16[(pcmPtr >> 1) + i];
-                        }
-
-                        mod._free(opusPtr);
-                        mod._free(pcmPtr);
-
+                        decodedData.set(mod.HEAP16.subarray(
+                            pcmPtr >> 1,
+                            (pcmPtr >> 1) + decodedSamples
+                        ));
                         return decodedData;
-                    } catch (error) {
-                        log(`Opus解码错误: ${error.message}`, 'error');
-                        return new Int16Array(0);
+                    } finally {
+                        if (opusPtr) mod._free(opusPtr);
+                        if (pcmPtr) mod._free(pcmPtr);
                     }
                 },
 
-                destroy: function () {
+                destroy() {
                     if (this.decoderPtr) {
                         this.module._free(this.decoderPtr);
                         this.decoderPtr = null;
@@ -134,159 +148,209 @@ export class AudioPlayer {
                 }
             };
 
-            if (!this.opusDecoder.init()) {
-                throw new Error("Opus解码器初始化失败");
-            }
-
+            this.opusDecoder.init();
+            log(`[音频诊断][播放] Opus解码器已就绪，输出=${this.SAMPLE_RATE}Hz/${this.CHANNELS}声道`, 'success');
             return this.opusDecoder;
-
         } catch (error) {
-            log(`Opus解码器初始化失败: ${error.message}`, 'error');
             this.opusDecoder = null;
+            log(`[音频诊断][播放] Opus解码器初始化失败: ${error.message}`, 'error');
             throw error;
         }
     }
 
-    // 启动音频缓冲
-    async startAudioBuffering() {
-        log("开始音频缓冲...", 'info');
+    async start() {
+        this.getAudioContext();
+        await this.initOpusDecoder();
+    }
 
-        this.initOpusDecoder().catch(error => {
-            log(`预初始化Opus解码器失败: ${error.message}`, 'warning');
+    beginStream(sessionId = '') {
+        if (this.streamActive && !this.streamEnded) {
+            log('[音频诊断][播放] 收到新的TTS开始消息，上一段传输尚未结束', 'warning');
+        }
+
+        this.streamSequence += 1;
+        this.streamActive = true;
+        this.streamEnded = false;
+        this.playbackStarted = this.activeSources.size > 0;
+        this.stats = this.createEmptyStats();
+        this.completionPromise = new Promise(resolve => {
+            this.resolveCompletion = resolve;
         });
 
-        const timeout = 400;
-        while (true) {
-            const packets = await this.queue.dequeue(
-                6,
-                timeout,
-                (count) => {
-                    log(`缓冲超时，当前缓冲包数: ${count}，开始播放`, 'info');
-                }
-            );
-            if (packets.length) {
-                log(`已缓冲 ${packets.length} 个音频包，开始播放`, 'info');
-                this.streamingContext.pushAudioBuffer(packets);
-            }
-
-            while (true) {
-                const data = await this.queue.dequeue(99, 30);
-                if (data.length) {
-                    this.streamingContext.pushAudioBuffer(data);
-                } else {
-                    break;
-                }
-            }
-        }
+        const audioContext = this.getAudioContext();
+        log(`[音频诊断][播放] TTS流开始，序号=${this.streamSequence}，会话=${sessionId || '未知'}，AudioContext=${audioContext.state}`, 'info');
     }
 
-    // 播放已缓冲的音频
-    async playBufferedAudio() {
-        try {
-            this.audioContext = this.getAudioContext();
-
-            if (!this.opusDecoder) {
-                log('初始化Opus解码器...', 'info');
-                try {
-                    this.opusDecoder = await this.initOpusDecoder();
-                    if (!this.opusDecoder) {
-                        throw new Error('解码器初始化失败');
-                    }
-                    log('Opus解码器初始化成功', 'success');
-                } catch (error) {
-                    log('Opus解码器初始化失败: ' + error.message, 'error');
-                    this.isPlaying = false;
-                    return;
-                }
-            }
-
-            if (!this.streamingContext) {
-                this.streamingContext = createStreamingContext(
-                    this.opusDecoder,
-                    this.audioContext,
-                    this.SAMPLE_RATE,
-                    this.CHANNELS,
-                    this.MIN_AUDIO_DURATION
-                );
-            }
-
-            this.streamingContext.decodeOpusFrames();
-            this.streamingContext.startPlaying();
-
-        } catch (error) {
-            log(`播放已缓冲的音频出错: ${error.message}`, 'error');
-            this.isPlaying = false;
-            this.streamingContext = null;
-        }
-    }
-
-    // 添加音频数据到队列
     enqueueAudioData(opusData) {
-        if (opusData.length > 0) {
-            this.queue.enqueue(opusData);
-        } else {
-            log('收到空音频数据帧，可能是结束标志', 'warning');
-            if (this.isPlaying && this.streamingContext) {
-                this.streamingContext.endOfStream = true;
-            }
+        if (!opusData || opusData.length === 0) {
+            log('[音频诊断][播放] 忽略空音频帧', 'warning');
+            return false;
         }
-    }
+        if (!this.opusDecoder) {
+            log('[音频诊断][播放] 收到音频时Opus解码器尚未就绪', 'error');
+            this.stats.decodeErrors += 1;
+            return false;
+        }
+        if (!this.streamActive) {
+            this.beginStream('隐式');
+        }
 
-    // 预加载解码器
-    async preload() {
-        log('预加载Opus解码器...', 'info');
+        this.stats.receivedPackets += 1;
+        this.stats.receivedBytes += opusData.length;
+
         try {
-            await this.initOpusDecoder();
-            log('Opus解码器预加载成功', 'success');
+            const pcm16 = this.opusDecoder.decode(opusData);
+            if (!pcm16.length) throw new Error('解码结果为空');
+
+            const pcm32 = new Float32Array(pcm16.length);
+            let sumSquares = 0;
+            let peak = 0;
+            for (let i = 0; i < pcm16.length; i++) {
+                const sample = pcm16[i] / 32768;
+                pcm32[i] = sample;
+                sumSquares += sample * sample;
+                peak = Math.max(peak, Math.abs(sample));
+            }
+
+            this.stats.decodedPackets += 1;
+            this.stats.decodedSamples += pcm32.length;
+            this.stats.rms = Math.sqrt(sumSquares / pcm32.length);
+            this.stats.peak = Math.max(this.stats.peak, peak);
+            this.pendingPcmChunks.push(pcm32);
+            this.pendingSamples += pcm32.length;
+
+            if (this.stats.receivedPackets === 1 || this.stats.receivedPackets % 20 === 0) {
+                log(`[音频诊断][播放] 已接收=${this.stats.receivedPackets}帧/${this.stats.receivedBytes}字节，已解码=${this.stats.decodedPackets}帧，RMS=${this.stats.rms.toFixed(4)}，峰值=${this.stats.peak.toFixed(4)}`, 'info');
+            }
+
+            this.scheduleAvailable(false);
+            return true;
         } catch (error) {
-            log(`Opus解码器预加载失败: ${error.message}，将在需要时重试`, 'warning');
+            this.stats.decodeErrors += 1;
+            log(`[音频诊断][播放] 第${this.stats.receivedPackets}帧Opus解码失败: ${error.message}`, 'error');
+            return false;
         }
     }
 
-    // 启动播放系统
-    async start() {
-        await this.preload();
-        this.playBufferedAudio();
-        this.startAudioBuffering();
-    }
+    scheduleAvailable(force) {
+        if (!this.pendingPcmChunks.length) return;
 
-    // 获取音频包统计信息
-    getAudioStats() {
-        if (!this.streamingContext) {
-            return {
-                pendingDecode: 0,
-                pendingPlay: 0,
-                totalPending: 0
+        const initialSamples = INITIAL_BUFFER_PACKETS * this.FRAME_SIZE;
+        if (!this.playbackStarted && !force && this.pendingSamples < initialSamples) {
+            return;
+        }
+
+        const audioContext = this.getAudioContext();
+        if (!this.playbackStarted) {
+            this.nextStartTime = Math.max(
+                audioContext.currentTime + START_DELAY_SECONDS,
+                this.nextStartTime
+            );
+            this.playbackStarted = true;
+            log(`[音频诊断][播放] 开始调度，首批样本=${this.pendingSamples}，AudioContext=${audioContext.state}`, audioContext.state === 'running' ? 'success' : 'warning');
+        }
+
+        while (this.pendingPcmChunks.length) {
+            const pcm = this.pendingPcmChunks.shift();
+            this.pendingSamples -= pcm.length;
+
+            const audioBuffer = audioContext.createBuffer(this.CHANNELS, pcm.length, this.SAMPLE_RATE);
+            audioBuffer.copyToChannel(pcm, 0);
+            const source = audioContext.createBufferSource();
+            source.buffer = audioBuffer;
+            source.connect(this.analyser);
+
+            const startTime = Math.max(this.nextStartTime, audioContext.currentTime + 0.005);
+            this.nextStartTime = startTime + audioBuffer.duration;
+            this.activeSources.add(source);
+            this.stats.scheduledChunks += 1;
+            this.stats.scheduledSamples += pcm.length;
+
+            source.onended = () => {
+                this.activeSources.delete(source);
+                try {
+                    source.disconnect();
+                } catch (error) {
+                    // The source may already be disconnected during an abort.
+                }
+                this.stats.completedChunks += 1;
+                this.stats.completedSamples += pcm.length;
+                this.checkPlaybackComplete();
             };
+            source.start(startTime);
+        }
+    }
+
+    endStream() {
+        if (!this.streamActive) return Promise.resolve();
+
+        this.streamEnded = true;
+        this.scheduleAvailable(true);
+        log(`[音频诊断][播放] TTS传输结束，接收=${this.stats.receivedPackets}帧/${this.stats.receivedBytes}字节，解码失败=${this.stats.decodeErrors}，待播源=${this.activeSources.size}`, 'info');
+        this.checkPlaybackComplete();
+        return this.completionPromise;
+    }
+
+    checkPlaybackComplete() {
+        if (!this.streamEnded || this.pendingPcmChunks.length || this.activeSources.size) {
+            return;
         }
 
-        const pendingDecode = this.streamingContext.getPendingDecodeCount();
-        const pendingPlay = this.streamingContext.getPendingPlayCount();
+        this.streamActive = false;
+        this.playbackStarted = false;
+        this.nextStartTime = this.audioContext ? this.audioContext.currentTime : 0;
+        log(`[音频诊断][播放] TTS已实际播放完成，完成=${this.stats.completedChunks}块/${this.stats.completedSamples}样本，峰值=${this.stats.peak.toFixed(4)}`, 'success');
 
+        if (this.resolveCompletion) {
+            const resolve = this.resolveCompletion;
+            this.resolveCompletion = null;
+            resolve(this.getAudioStats());
+        }
+    }
+
+    getAudioStats() {
         return {
-            pendingDecode,  // 待解码包数
-            pendingPlay,    // 待播放包数
-            totalPending: pendingDecode + pendingPlay  // 总待处理包数
+            ...this.stats,
+            pendingDecode: 0,
+            pendingPlay: this.pendingPcmChunks.length + this.activeSources.size,
+            totalPending: this.pendingPcmChunks.length + this.activeSources.size,
+            audioContextState: this.audioContext?.state || '未创建',
+            audioContextSampleRate: this.audioContext?.sampleRate || 0
         };
     }
 
-    // 清空所有音频缓冲并停止播放
-    clearAllAudio() {
-        log('AudioPlayer: 清空所有音频', 'info');
+    getAnalyser() {
+        return this.analyser;
+    }
 
-        // 清空接收队列（使用clear方法保持对象引用）
-        this.queue.clear();
+    clearAllAudio(reason = '中止') {
+        this.pendingPcmChunks = [];
+        this.pendingSamples = 0;
+        this.streamEnded = true;
+        this.streamActive = false;
+        this.playbackStarted = false;
 
-        // 清空流上下文的所有缓冲
-        if (this.streamingContext) {
-            this.streamingContext.clearAllBuffers();
+        for (const source of this.activeSources) {
+            source.onended = null;
+            try {
+                source.stop();
+                source.disconnect();
+            } catch (error) {
+                // Ignore sources that have already ended.
+            }
         }
+        this.activeSources.clear();
+        this.nextStartTime = this.audioContext ? this.audioContext.currentTime : 0;
 
-        log('AudioPlayer: 音频已清空', 'success');
+        if (this.resolveCompletion) {
+            const resolve = this.resolveCompletion;
+            this.resolveCompletion = null;
+            resolve(this.getAudioStats());
+        }
+        log(`[音频诊断][播放] 已中止并清空音频，原因=${reason}`, 'warning');
     }
 }
 
-// 创建单例
 let audioPlayerInstance = null;
 
 export function getAudioPlayer() {

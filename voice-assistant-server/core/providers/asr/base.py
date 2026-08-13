@@ -75,10 +75,17 @@ class ASRProviderBase(ABC):
             # 自动模式下通过VAD检测到语音停止时触发识别
             if conn.asr.interface_type != InterfaceType.STREAM and conn.client_voice_stop:
                 asr_audio_task = conn.asr_audio.copy()
+                logger.bind(tag=TAG).info(
+                    f"[音频诊断][ASR] VAD判定一句话结束，准备识别={len(asr_audio_task)}个Opus帧"
+                )
                 conn.reset_audio_states()
 
                 if len(asr_audio_task) > 15:
                     await self.handle_voice_stop(conn, asr_audio_task)
+                else:
+                    logger.bind(tag=TAG).warning(
+                        f"[音频诊断][ASR] 音频仅{len(asr_audio_task)}帧，少于最低16帧，已忽略"
+                    )
 
     # 处理语音停止
     async def handle_voice_stop(self, conn: "ConnectionHandler", asr_audio_task: List[bytes]):

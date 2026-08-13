@@ -164,6 +164,8 @@ class ConnectionHandler:
         self.vad_last_voice_time = 0.0  # 记录用户最后一次说话的时间（毫秒）
         self.client_voice_stop = False
         self.last_is_voice = False
+        self.audio_rx_packets = 0
+        self.audio_rx_bytes = 0
 
         # asr相关变量
         # 因为实际部署时可能会用到公共的本地ASR，不能把变量暴露给公共ASR
@@ -396,6 +398,20 @@ class ConnectionHandler:
         elif isinstance(message, bytes):
             if self.vad is None or self.asr is None:
                 return
+
+            if len(message) == 0:
+                self.logger.bind(tag=TAG).warning(
+                    "[音频诊断][上行] 收到空二进制帧，已忽略（空帧不是Opus结束标志）"
+                )
+                return
+
+            self.audio_rx_packets += 1
+            self.audio_rx_bytes += len(message)
+            if self.audio_rx_packets == 1 or self.audio_rx_packets % 500 == 0:
+                self.logger.bind(tag=TAG).info(
+                    f"[音频诊断][上行] WebSocket已接收={self.audio_rx_packets}帧/"
+                    f"{self.audio_rx_bytes}字节，当前帧={len(message)}字节"
+                )
 
             # 处理来自MQTT网关的音频包
             if self.conn_from_mqtt_gateway and len(message) >= 16:

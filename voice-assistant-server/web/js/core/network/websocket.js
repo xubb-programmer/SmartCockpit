@@ -89,6 +89,8 @@ export class WebSocketHandler {
     handleTextMessage(message) {
         if (message.type === 'hello') {
             log(`服务器回应：${JSON.stringify(message, null, 2)}`, 'success');
+            const audioParams = message.audio_params || {};
+            log(`[音频诊断][协议] 服务端输出格式=${audioParams.format || '未知'}，采样率=${audioParams.sample_rate || '未知'}Hz，声道=${audioParams.channels || '未知'}，帧时长=${audioParams.frame_duration || '未知'}ms`, 'info');
             log('连接成功', 'success');
             uiController.updateDialButton(true);
             uiController.startAIChatSession();
@@ -179,6 +181,7 @@ export class WebSocketHandler {
             log('服务器开始发送语音', 'info');
             this.currentSessionId = message.session_id;
             this.isRemoteSpeaking = true;
+            getAudioPlayer().beginStream(message.session_id);
             if (this.onSessionStateChange) {
                 this.onSessionStateChange(true);
             }
@@ -212,23 +215,19 @@ export class WebSocketHandler {
 
             // 句子结束时不清除动画，等待下一个句子或最终停止
         } else if (message.state === 'stop') {
-            log('服务器语音传输结束，清空所有音频缓冲', 'info');
-
-            // 清空所有音频缓冲并停止播放
             const audioPlayer = getAudioPlayer();
-            audioPlayer.clearAllAudio();
-
-            this.isRemoteSpeaking = false;
-            if (this.onRecordButtonStateChange) {
-                this.onRecordButtonStateChange(false);
-            }
-            if (this.onSessionStateChange) {
-                this.onSessionStateChange(false);
-            }
-
-            setTimeout(() => {
+            const streamSequence = audioPlayer.streamSequence;
+            log('[音频诊断][播放] 服务端音频传输已结束，等待浏览器播放队列排空', 'info');
+            audioPlayer.endStream().then(() => {
+                if (audioPlayer.streamSequence !== streamSequence || audioPlayer.streamActive) {
+                    return;
+                }
+                this.isRemoteSpeaking = false;
+                if (this.onSessionStateChange) {
+                    this.onSessionStateChange(false);
+                }
                 this.ttsSentenceCount = 0; // 重置计数器
-            }, 1000);
+            });
         }
     }
 
@@ -534,6 +533,9 @@ export class WebSocketHandler {
 
             const audioRecorder = getAudioRecorder();
             audioRecorder.stop();
+            getAudioPlayer().clearAllAudio('WebSocket已断开');
+            this.isRemoteSpeaking = false;
+            this.currentSessionId = null;
 
         };
 
@@ -572,6 +574,7 @@ export class WebSocketHandler {
         this.websocket.close();
         const audioRecorder = getAudioRecorder();
         audioRecorder.stop();
+        getAudioPlayer().clearAllAudio('用户断开连接');
 
     }
 

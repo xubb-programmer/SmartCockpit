@@ -12,17 +12,36 @@ export class AudioRecorder {
         this.audioProcessor = null;
         this.audioProcessorType = null;
         this.audioSource = null;
+        this.mediaStream = null;
+        this.processorOutput = null;
         this.opusEncoder = null;
         this.pcmDataBuffer = new Int16Array();
-        this.audioBuffers = [];
         this.totalAudioSize = 0;
         this.visualizationRequest = null;
         this.recordingTimer = null;
         this.websocket = null;
+        this.isStopping = false;
+        this.workletModuleLoaded = false;
+        this.stopResolver = null;
+        this.stats = this.createEmptyStats();
         // Callback functions
         this.onRecordingStart = null;
         this.onRecordingStop = null;
         this.onVisualizerUpdate = null;
+    }
+
+    createEmptyStats() {
+        return {
+            pcmFrames: 0,
+            pcmSamples: 0,
+            rms: 0,
+            peak: 0,
+            encodedFrames: 0,
+            encodedBytes: 0,
+            sentFrames: 0,
+            sentBytes: 0,
+            sendErrors: 0
+        };
     }
 
     // Set WebSocket instance
@@ -92,14 +111,25 @@ export class AudioRecorder {
         this.audioContext = this.getAudioContext();
         try {
             if (this.audioContext.audioWorklet) {
-                const blob = new Blob([this.getAudioProcessorCode()], { type: 'application/javascript' });
-                const url = URL.createObjectURL(blob);
-                await this.audioContext.audioWorklet.addModule(url);
-                URL.revokeObjectURL(url);
+                if (!this.workletModuleLoaded) {
+                    const blob = new Blob([this.getAudioProcessorCode()], { type: 'application/javascript' });
+                    const url = URL.createObjectURL(blob);
+                    try {
+                        await this.audioContext.audioWorklet.addModule(url);
+                        this.workletModuleLoaded = true;
+                    } finally {
+                        URL.revokeObjectURL(url);
+                    }
+                }
                 const audioProcessor = new AudioWorkletNode(this.audioContext, 'audio-recorder-processor');
                 audioProcessor.port.onmessage = (event) => {
                     if (event.data.type === 'buffer') {
                         this.processPCMBuffer(event.data.buffer);
+                    } else if (event.data.type === 'status' && event.data.status === 'stopped') {
+                        if (this.stopResolver) {
+                            this.stopResolver();
+                            this.stopResolver = null;
+                        }
                     }
                 };
                 log('使用AudioWorklet处理音频', 'success');
@@ -107,6 +137,7 @@ export class AudioRecorder {
                 silent.gain.value = 0;
                 audioProcessor.connect(silent);
                 silent.connect(this.audioContext.destination);
+                this.processorOutput = silent;
                 return { node: audioProcessor, type: 'worklet' };
             } else {
                 log('AudioWorklet不可用，使用ScriptProcessorNode作为后备方案', 'warning');
@@ -136,6 +167,7 @@ export class AudioRecorder {
             silent.gain.value = 0;
             scriptProcessor.connect(silent);
             silent.connect(this.audioContext.destination);
+            this.processorOutput = silent;
             log('使用ScriptProcessorNode作为后备方案成功', 'warning');
             return { node: scriptProcessor, type: 'processor' };
         } catch (fallbackError) {
@@ -146,7 +178,7 @@ export class AudioRecorder {
 
     // Process PCM buffer data
     processPCMBuffer(buffer) {
-        if (!this.isRecording) return;
+        if (!this.isRecording && !this.isStopping) return;
         const newBuffer = new Int16Array(this.pcmDataBuffer.length + buffer.length);
         newBuffer.set(this.pcmDataBuffer);
         newBuffer.set(buffer, this.pcmDataBuffer.length);
@@ -155,7 +187,28 @@ export class AudioRecorder {
         while (this.pcmDataBuffer.length >= samplesPerFrame) {
             const frameData = this.pcmDataBuffer.slice(0, samplesPerFrame);
             this.pcmDataBuffer = this.pcmDataBuffer.slice(samplesPerFrame);
+            this.recordPcmStats(frameData);
             this.encodeAndSendOpus(frameData);
+        }
+    }
+
+    recordPcmStats(pcmData) {
+        let sumSquares = 0;
+        let peak = 0;
+        for (let i = 0; i < pcmData.length; i++) {
+            const sample = pcmData[i] / 32768;
+            sumSquares += sample * sample;
+            peak = Math.max(peak, Math.abs(sample));
+        }
+
+        this.stats.pcmFrames += 1;
+        this.stats.pcmSamples += pcmData.length;
+        this.stats.rms = Math.sqrt(sumSquares / pcmData.length);
+        this.stats.peak = Math.max(this.stats.peak, peak);
+        if (this.stats.pcmFrames === 1) {
+            log(`[音频诊断][麦克风] PCM=${this.stats.pcmFrames}帧/${this.stats.pcmSamples}样本，RMS=${this.stats.rms.toFixed(4)}，峰值=${this.stats.peak.toFixed(4)}`, 'info');
+        } else if (this.stats.pcmFrames % 500 === 0) {
+            console.info(`[音频诊断][麦克风] PCM=${this.stats.pcmFrames}帧/${this.stats.pcmSamples}样本，RMS=${this.stats.rms.toFixed(4)}，峰值=${this.stats.peak.toFixed(4)}`);
         }
     }
 
@@ -169,14 +222,26 @@ export class AudioRecorder {
             if (pcmData) {
                 const opusData = this.opusEncoder.encode(pcmData);
                 if (opusData && opusData.length > 0) {
-                    this.audioBuffers.push(opusData.buffer);
+                    this.stats.encodedFrames += 1;
+                    this.stats.encodedBytes += opusData.length;
                     this.totalAudioSize += opusData.length;
                     if (this.websocket && this.websocket.readyState === WebSocket.OPEN) {
                         try {
                             this.websocket.send(opusData.buffer);
+                            this.stats.sentFrames += 1;
+                            this.stats.sentBytes += opusData.length;
+                            if (this.stats.sentFrames === 1) {
+                                log(`[音频诊断][麦克风] 已编码并发送=${this.stats.sentFrames}帧/${this.stats.sentBytes}字节，WebSocket待发送=${this.websocket.bufferedAmount}字节`, 'info');
+                            } else if (this.stats.sentFrames % 500 === 0) {
+                                console.info(`[音频诊断][麦克风] 已编码并发送=${this.stats.sentFrames}帧/${this.stats.sentBytes}字节，WebSocket待发送=${this.websocket.bufferedAmount}字节`);
+                            }
                         } catch (error) {
+                            this.stats.sendErrors += 1;
                             log(`WebSocket发送错误: ${error.message}`, 'error');
                         }
+                    } else {
+                        this.stats.sendErrors += 1;
+                        log('[音频诊断][麦克风] Opus帧未发送：WebSocket未连接', 'error');
                     }
                 } else {
                     log('Opus编码失败，未返回有效数据', 'error');
@@ -218,38 +283,47 @@ export class AudioRecorder {
                 log('无法开始录音: Opus编码器初始化失败', 'error');
                 return false;
             }
+            if (!this.websocket || this.websocket.readyState !== WebSocket.OPEN) {
+                log('WebSocket未连接，无法开始录音', 'error');
+                return false;
+            }
+
+            await this.cleanupAudioResources();
             log('请至少录制1-2秒音频以确保收集足够的数据', 'info');
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, sampleRate: 16000, channelCount: 1 } });
+            this.mediaStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, sampleRate: 16000, channelCount: 1 } });
             this.audioContext = this.getAudioContext();
             if (this.audioContext.state === 'suspended') {
-                await this.audioContext.resume();
+                this.audioContext.resume().catch(error => {
+                    log(`[音频诊断][麦克风] 恢复AudioContext失败: ${error.message}`, 'error');
+                });
             }
             const processorResult = await this.createAudioProcessor();
             if (!processorResult) {
                 log('无法创建音频处理器', 'error');
+                await this.cleanupAudioResources();
                 return false;
             }
             this.audioProcessor = processorResult.node;
             this.audioProcessorType = processorResult.type;
-            this.audioSource = this.audioContext.createMediaStreamSource(stream);
+            this.audioSource = this.audioContext.createMediaStreamSource(this.mediaStream);
             this.analyser = this.audioContext.createAnalyser();
             this.analyser.fftSize = 2048;
             this.audioSource.connect(this.analyser);
             this.audioSource.connect(this.audioProcessor);
             this.pcmDataBuffer = new Int16Array();
-            this.audioBuffers = [];
             this.totalAudioSize = 0;
+            this.stats = this.createEmptyStats();
+            this.isStopping = false;
             this.isRecording = true;
             if (this.audioProcessorType === 'worklet' && this.audioProcessor.port) {
                 this.audioProcessor.port.postMessage({ command: 'start' });
             }
-            // Send listening start message
-            if (this.websocket && this.websocket.readyState === WebSocket.OPEN) {
-                log(`已发送录音开始消息`, 'info');
-            } else {
-                log('WebSocket未连接，无法发送开始消息', 'error');
-                return false;
-            }
+            this.websocket.send(JSON.stringify({ type: 'listen', state: 'start', mode: 'auto' }));
+
+            const track = this.mediaStream.getAudioTracks()[0];
+            const settings = track?.getSettings ? track.getSettings() : {};
+            log(`[音频诊断][麦克风] 采集已开始，设备=${track?.label || '默认设备'}，轨道采样率=${settings.sampleRate || '未知'}Hz，声道=${settings.channelCount || '未知'}，AudioContext=${this.audioContext.sampleRate}Hz/${this.audioContext.state}`, 'success');
+            log('[音频诊断][麦克风] 已发送listen/start(auto)', 'info');
             // Start visualization
             if (this.onVisualizerUpdate) {
                 const dataArray = new Uint8Array(this.analyser.frequencyBinCount);
@@ -272,6 +346,8 @@ export class AudioRecorder {
         } catch (error) {
             log(`直接录音启动错误: ${error.message}`, 'error');
             this.isRecording = false;
+            this.isStopping = false;
+            await this.cleanupAudioResources();
             return false;
         }
     }
@@ -290,21 +366,26 @@ export class AudioRecorder {
     }
 
     // Stop recording
-    stop() {
+    async stop() {
         if (!this.isRecording) return false;
         try {
-            this.isRecording = false;
+            this.isStopping = true;
             if (this.audioProcessor) {
                 if (this.audioProcessorType === 'worklet' && this.audioProcessor.port) {
-                    this.audioProcessor.port.postMessage({ command: 'stop' });
+                    await new Promise(resolve => {
+                        let settled = false;
+                        const finish = () => {
+                            if (settled) return;
+                            settled = true;
+                            resolve();
+                        };
+                        this.stopResolver = finish;
+                        this.audioProcessor.port.postMessage({ command: 'stop' });
+                        setTimeout(finish, 150);
+                    });
                 }
-                this.audioProcessor.disconnect();
-                this.audioProcessor = null;
             }
-            if (this.audioSource) {
-                this.audioSource.disconnect();
-                this.audioSource = null;
-            }
+            this.isRecording = false;
             if (this.visualizationRequest) {
                 cancelAnimationFrame(this.visualizationRequest);
                 this.visualizationRequest = null;
@@ -315,21 +396,67 @@ export class AudioRecorder {
             }
             // Encode and send remaining data
             this.encodeAndSendOpus();
-            // Send end signal
+            // The server protocol uses a listen/stop JSON message. An empty binary
+            // frame is not an Opus end marker and must never enter VAD decoding.
             if (this.websocket && this.websocket.readyState === WebSocket.OPEN) {
-                const emptyOpusFrame = new Uint8Array(0);
-                this.websocket.send(emptyOpusFrame);
-                log('已发送录音停止信号', 'info');
+                this.websocket.send(JSON.stringify({ type: 'listen', state: 'stop', mode: 'auto' }));
+                log('[音频诊断][麦克风] 已发送listen/stop(auto)', 'info');
             }
+            await this.cleanupAudioResources();
+            this.isStopping = false;
             if (this.onRecordingStop) {
                 this.onRecordingStop();
             }
-            log('已停止PCM直接录音', 'success');
+            log(`[音频诊断][麦克风] 采集已停止，PCM=${this.stats.pcmFrames}帧，发送=${this.stats.sentFrames}帧/${this.stats.sentBytes}字节，峰值=${this.stats.peak.toFixed(4)}，发送错误=${this.stats.sendErrors}`, 'success');
             return true;
         } catch (error) {
             log(`直接录音停止错误: ${error.message}`, 'error');
+            this.isRecording = false;
+            this.isStopping = false;
+            await this.cleanupAudioResources();
             return false;
         }
+    }
+
+    async cleanupAudioResources() {
+        if (this.audioSource) {
+            try {
+                this.audioSource.disconnect();
+            } catch (error) {
+                // Already disconnected.
+            }
+            this.audioSource = null;
+        }
+        if (this.audioProcessor) {
+            try {
+                this.audioProcessor.disconnect();
+            } catch (error) {
+                // Already disconnected.
+            }
+            this.audioProcessor = null;
+        }
+        if (this.processorOutput) {
+            try {
+                this.processorOutput.disconnect();
+            } catch (error) {
+                // Already disconnected.
+            }
+            this.processorOutput = null;
+        }
+        if (this.mediaStream) {
+            this.mediaStream.getTracks().forEach(track => track.stop());
+            this.mediaStream = null;
+        }
+        this.analyser = null;
+    }
+
+    getAudioStats() {
+        return {
+            ...this.stats,
+            isRecording: this.isRecording,
+            audioContextState: this.audioContext?.state || '未创建',
+            audioContextSampleRate: this.audioContext?.sampleRate || 0
+        };
     }
 
     // Get analyser
