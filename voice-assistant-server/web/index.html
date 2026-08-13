@@ -5,7 +5,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>智能控制中心</title>
-    <link rel="stylesheet" href="css/style.css?v=0528">
+    <link rel="stylesheet" href="css/style.css?v=0812c">
     <script>
         // 检测是否使用file://协议打开
         if (window.location.protocol === 'file:') {
@@ -46,6 +46,22 @@
     <div class="container">
 
 
+
+        <section class="video-stage" id="videoStage" aria-label="设备实时画面">
+            <video id="deviceVideo" playsinline muted></video>
+            <div class="video-state" id="videoState">
+                <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M17 10.5V7c0-1.1-.9-2-2-2H5C3.9 5 3 5.9 3 7v10c0 1.1.9 2 2 2h10c1.1 0 2-.9 2-2v-3.5l4 4v-11l-4 4z"/></svg>
+                <strong id="videoStateTitle">未播放视频</strong>
+                <span id="videoStateMessage">请在视频设置中填写 RTSP 或 RTMP 地址</span>
+            </div>
+            <div class="video-overlay">
+                <div class="video-status-badge">
+                    <span class="video-status-dot" id="videoStatusDot"></span>
+                    <span id="videoStatusText">视频未连接</span>
+                </div>
+                <span id="videoStreamInfo"></span>
+            </div>
+        </section>
 
         <!-- 连接状态指示器 - 页面顶部中部 -->
         <div class="connection-status-top">
@@ -98,6 +114,11 @@
 
 
 
+            <button class="control-btn" id="videoBtn" title="实时画面">
+                <svg class="btn-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M17 10.5V7A2 2 0 0 0 15 5H5A2 2 0 0 0 3 7v10a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-3.5l4 4v-11l-4 4Z"/></svg>
+                <span class="btn-text">画面</span>
+            </button>
+
             <button class="control-btn dial-btn" id="dialBtn" title="拨号">
                 <svg class="btn-icon" viewBox="0 0 24 24" fill="currentColor">
                     <path
@@ -113,6 +134,11 @@
                 </svg>
                 <span class="btn-text">录音</span>
             </button>
+
+            <button class="control-btn" id="videoFullscreenBtn" title="全屏显示视频" disabled>
+                <svg class="btn-icon" viewBox="0 0 24 24" fill="currentColor"><path d="M7 14H5v5h5v-2H7v-3m-2-4h2V7h3V5H5v5m12 7h-3v2h5v-5h-2v3m-3-12v2h3v3h2V5h-5Z"/></svg>
+                <span class="btn-text">全屏</span>
+            </button>
         </div>
     </div>
 
@@ -126,6 +152,7 @@
             <div class="modal-body">
                 <div class="settings-tabs">
                     <button class="tab-btn active" data-tab="device">设备配置</button>
+                    <button class="tab-btn" data-tab="video">视频配置</button>
                     <button class="tab-btn" data-tab="mcp">MCP工具</button>
                     <button class="tab-btn" data-tab="other">其他设置</button>
                 </div>
@@ -179,6 +206,44 @@
                                 <button id="switchVehicleBtn" class="btn-primary" style="white-space:nowrap;padding:6px 14px;">切换</button>
                             </div>
                             <div id="vehicleSwitchMsg" style="margin-top:4px;font-size:12px;color:#aaa;"></div>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="tab-content" id="videoTab">
+                    <div class="video-settings-panel">
+                        <div class="input-group">
+                            <label for="videoStreamUrl">视频流地址:</label>
+                            <div class="password-input-wrap">
+                                <input type="password" id="videoStreamUrl" list="videoStreamHistory"
+                                    placeholder="rtsp://用户名:密码@设备地址:554/路径">
+                                <button type="button" class="input-icon-btn" id="toggleVideoUrlBtn" title="显示或隐藏视频流地址">显示</button>
+                            </div>
+                            <datalist id="videoStreamHistory"></datalist>
+                        </div>
+                        <div class="video-history-row">
+                            <label for="videoHistorySelect">历史地址:</label>
+                            <div class="video-history-controls">
+                                <select id="videoHistorySelect" class="model-select">
+                                    <option value="">暂无历史地址</option>
+                                </select>
+                                <button type="button" class="input-icon-btn" id="deleteVideoHistoryBtn"
+                                    title="删除当前历史地址" disabled>删除</button>
+                            </div>
+                        </div>
+                        <div class="video-protocol-row"><span>协议识别</span><strong id="videoProtocolText">未识别</strong></div>
+                        <label class="setting-switch">
+                            <span>页面启动时自动播放</span>
+                            <input type="checkbox" id="videoAutoPlay"><span class="switch-track"></span>
+                        </label>
+                        <label class="setting-switch">
+                            <span>断线自动重连</span>
+                            <input type="checkbox" id="videoAutoReconnect" checked><span class="switch-track"></span>
+                        </label>
+                        <div class="video-setting-status" id="videoSettingStatus">视频未连接</div>
+                        <div class="modal-actions">
+                            <button type="button" class="btn-secondary" id="stopVideoBtn">停止播放</button>
+                            <button type="button" class="btn-primary" id="playVideoBtn">保存并播放</button>
                         </div>
                     </div>
                 </div>
@@ -343,7 +408,7 @@
     <script src="js/utils/libopus.js?v=0205"></script>
 
     <!-- 主应用入口 -->
-    <script type="module" src="js/app.js?v=0528"></script>
+    <script type="module" src="js/app.js?v=0812c"></script>
 
     <!-- 全局错误处理 -->
     <script>

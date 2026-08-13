@@ -54,6 +54,195 @@ body {
     /* 移除底部padding，让模型可以延伸到页面底部 */
 }
 
+/* ==================== 设备实时画面 ==================== */
+.video-stage {
+    position: fixed;
+    top: 50%;
+    left: 50%;
+    width: min(76vw, 1180px);
+    max-width: calc((100vh - 176px) * 16 / 9);
+    aspect-ratio: 16 / 9;
+    transform: translate(-50%, calc(-50% - 22px));
+    display: none;
+    overflow: hidden;
+    background: #080a0d;
+    border: 1px solid rgba(255, 255, 255, 0.18);
+    border-radius: 8px;
+    box-shadow: 0 16px 40px rgba(0, 0, 0, 0.42);
+    z-index: 150;
+}
+
+body.video-mode .video-stage { display: block; }
+body.video-mode #live2d-stage,
+body.video-mode .model-container { visibility: hidden; }
+body.video-mode .chat-container {
+    right: 20px;
+    z-index: 160;
+}
+
+.video-stage:fullscreen {
+    width: 100vw;
+    max-width: none;
+    height: 100vh;
+    aspect-ratio: auto;
+    transform: none;
+    border: 0;
+    border-radius: 0;
+}
+
+.video-stage video {
+    width: 100%;
+    height: 100%;
+    display: block;
+    object-fit: contain;
+    background: #000;
+}
+
+.video-state {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 24px;
+    color: #d8dde5;
+    background: #101319;
+    text-align: center;
+}
+
+.video-state.hidden { display: none; }
+.video-state svg { width: 52px; height: 52px; fill: #6f7885; }
+.video-state strong { font-size: 18px; }
+.video-state span { color: #9099a6; font-size: 13px; line-height: 1.5; }
+
+.video-overlay {
+    position: absolute;
+    top: 12px;
+    left: 12px;
+    right: 12px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    pointer-events: none;
+    color: #e8ebef;
+    font-size: 12px;
+    text-shadow: 0 1px 3px #000;
+}
+
+.video-status-badge {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+    padding: 7px 10px;
+    background: rgba(12, 15, 20, 0.78);
+    border-radius: 6px;
+}
+
+.video-status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: #7d8590;
+}
+
+.video-status-dot.connecting,
+.video-status-dot.reconnecting { background: #ffb020; }
+.video-status-dot.playing { background: #35c46a; }
+.video-status-dot.error { background: #ef5350; }
+.control-btn.video-active { background: rgba(39, 125, 161, 0.92); }
+
+.password-input-wrap {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+}
+
+.input-icon-btn {
+    min-width: 56px;
+    border: 1px solid #555b64;
+    border-radius: 6px;
+    color: #e5e7eb;
+    background: #4a4f57;
+    cursor: pointer;
+}
+
+.video-history-row {
+    margin-bottom: 16px;
+}
+
+.video-history-row > label {
+    display: block;
+    margin-bottom: 8px;
+    color: #b9bbbe;
+    font-size: 14px;
+    font-weight: 500;
+}
+
+.video-history-controls {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 8px;
+}
+
+.video-history-controls .model-select {
+    width: 100%;
+    min-width: 0;
+}
+
+.video-history-controls option {
+    max-width: 560px;
+}
+
+.video-protocol-row,
+.video-setting-status {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 16px;
+    color: #aeb4bd;
+    font-size: 13px;
+}
+
+.video-setting-status {
+    padding: 10px 12px;
+    background: #2f3339;
+    border-radius: 6px;
+}
+
+.setting-switch {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 42px;
+    align-items: center;
+    gap: 16px;
+    min-height: 44px;
+    color: #d5d8dc;
+    font-size: 14px;
+}
+
+.setting-switch input { position: absolute; opacity: 0; }
+.switch-track {
+    position: relative;
+    width: 42px;
+    height: 22px;
+    border-radius: 12px;
+    background: #555b64;
+    cursor: pointer;
+}
+.switch-track::after {
+    content: '';
+    position: absolute;
+    top: 3px;
+    left: 3px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: white;
+    transition: transform 0.2s;
+}
+.setting-switch input:checked + .switch-track { background: #2e8b78; }
+.setting-switch input:checked + .switch-track::after { transform: translateX(20px); }
+
 /* ==================== 模型加载区 ==================== */
 .model-container {
     position: absolute;
@@ -1311,6 +1500,28 @@ body {
 
 /* ==================== 响应式设计 ==================== */
 @media (max-width: 768px) {
+    .video-stage {
+        top: 58px;
+        left: 12px;
+        width: calc(100vw - 24px);
+        max-width: none;
+        aspect-ratio: 16 / 9;
+        transform: none;
+    }
+
+    body.video-mode .chat-container {
+        top: calc(58px + ((100vw - 24px) * 0.5625) + 12px);
+        bottom: 112px;
+        right: 12px;
+    }
+
+    body.video-mode .chat-stream { max-height: 24vh; }
+    .settings-tabs { overflow-x: auto; }
+    .tab-btn {
+        flex: 0 0 auto;
+        padding-inline: 16px;
+    }
+
     .container {
         padding: 10px;
     }

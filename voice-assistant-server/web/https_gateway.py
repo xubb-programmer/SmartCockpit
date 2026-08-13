@@ -16,6 +16,7 @@ from urllib.parse import unquote, urlsplit
 from aiohttp import ClientSession, ClientTimeout, WSMsgType, web
 
 from https_server import generate_self_signed_cert
+from video_stream import VideoStreamBridge
 
 
 HOP_BY_HOP_HEADERS = {
@@ -218,10 +219,13 @@ class HttpsGateway:
 
 def create_app(web_dir, http_target, ws_target):
     gateway = HttpsGateway(web_dir, http_target, ws_target)
+    video_bridge = VideoStreamBridge()
     app = web.Application(client_max_size=16 * 1024 * 1024)
     app.on_startup.append(gateway.start_session)
     app.on_cleanup.append(gateway.close_session)
+    app.on_cleanup.append(video_bridge.close)
 
+    app.router.add_get("/video/ws", video_bridge.websocket)
     app.router.add_route("*", "/voice_assistant/v1", gateway.proxy_websocket)
     app.router.add_route("*", "/voice_assistant/v1/{tail:.*}", gateway.proxy_websocket)
     app.router.add_route("*", "/voice_assistant/{tail:.*}", gateway.proxy_http)

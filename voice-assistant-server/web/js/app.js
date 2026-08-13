@@ -4,6 +4,7 @@ import { getAudioPlayer } from './core/audio/player.js';
 import { checkMicrophoneAvailability, isHttpNonLocalhost } from './core/audio/recorder.js';
 import { initMcpTools } from './core/mcp/tools.js';
 import { uiController } from './ui/controller.js';
+import { videoUIController } from './ui/video-controller.js?v=0812c';
 import { log } from './utils/logger.js';
 
 // 应用类
@@ -19,6 +20,7 @@ class App {
         // 初始化UI控制器
         this.uiController = uiController;
         this.uiController.init();
+        videoUIController.init();
         // 检查Opus库
         checkOpusLoaded();
         // 初始化Opus编码器
