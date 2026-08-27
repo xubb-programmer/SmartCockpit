@@ -1,4 +1,4 @@
-import { videoStreamPlayer } from '../core/video/player.js?v=0812c';
+import { videoStreamPlayer } from '../core/video/player.js?v=0819a';
 
 class VideoUIController {
     init() {
@@ -20,6 +20,7 @@ class VideoUIController {
         this.bindEvents();
         this.player.onStatusChange = (status, message) => this.updateStatus(status, message);
         this.player.onStreamInfo = (info) => this.updateStreamInfo(info);
+        window.getVideoDiagnostics = () => this.player.getDiagnostics();
         if (this.player.config.autoPlay && this.player.config.url) {
             this.showStage();
             setTimeout(() => this.play(), 300);
@@ -175,9 +176,10 @@ class VideoUIController {
 
     updateStreamInfo(info) {
         const size = info.width && info.height ? `${info.width}×${info.height}` : '';
+        const fps = Number(info.fps) > 0 ? `${Math.round(Number(info.fps))} FPS` : '';
         const mode = info.transcoding ? '转码' : '直通';
         document.getElementById('videoStreamInfo').textContent =
-            [size, String(info.sourceCodec).toUpperCase(), mode].filter(Boolean).join(' · ');
+            [size, fps, String(info.sourceCodec).toUpperCase(), mode].filter(Boolean).join(' · ');
     }
 }
 

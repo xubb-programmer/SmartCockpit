@@ -30,7 +30,7 @@ vehicle_control_function_desc = {
     "function": {
         "name": "vehicle_control",
         "description": (
-            "控制车辆搭载的设备（白光摄像机/热像仪/转台/激光器/跟踪器/桅杆等）。"
+            "控制车辆搭载的设备（白光摄像机/热像仪/稳台/转台/激光器/跟踪器/桅杆等）。"
             "只有用户明确下达控制指令时才调用，疑问句和状态查询不调用。"
         ),
         "parameters": {
@@ -43,7 +43,7 @@ vehicle_control_function_desc = {
                     ],
                     "description": (
                         "设备标识：vis_cam / ir_cam / gimbal / laser / tracker / mast。"
-                        "控制多个设备时传字符串数组；禁止使用 all。"
+                        "控制多个设备时传字符串数组；控制整车所有相关设备时可使用 all。"
                         "数组中每个设备都必须支持该动作，否则整条指令不执行。"
                     ),
                 },
@@ -108,7 +108,7 @@ _ACTION_CN: Dict[str, str] = {
     # 热像 校正
     "gamma_correction": "图像校正中",
     "scene_correction": "场景校正中",
-    # 转台
+    # 稳台/转台
     "zero_return":      "归零中",
     "zero_drift":       "零漂校正中",
     "scan_circle":      "开始周扫",
@@ -361,17 +361,60 @@ def vehicle_control(
                 response="请告诉我需要执行什么操作",
             )
 
+    # 兼容旧提示词和模型输出：all 统一进入批量展开逻辑。
+    if isinstance(target, str) and target.lower() == "all":
+        target = [target]
+
     # ── 批量指令：target 为列表时逐一执行 ─────────────────────────────────────
     if isinstance(target, list):
-        targets = target
+        targets = list(target)
         actions = action if isinstance(action, list) else [action] * len(targets)
 
-        if any(isinstance(t, str) and t.lower() == "all" for t in targets):
-            logger.bind(tag=TAG).warning("[vehicle_control] 批量指令拒绝 target=all")
-            return ActionResponse(
-                action=Action.RESPONSE,
-                result=json.dumps({"error": "禁止使用 target=all"}, ensure_ascii=False),
-                response="请明确需要控制的设备",
+        target_ids = [t for t in targets if isinstance(t, str)]
+        has_all_alias = any(t.lower() == "all" for t in target_ids)
+        covers_full_inventory = (
+            len(target_ids) == len(targets)
+            and set(target_ids) == set(vc.devices.keys())
+        )
+
+        # “所有设备”是动作相关的逻辑组。例如 Z1 上电只包含具备整机电源动作的
+        # 白光、热像、稳台和激光，不应因跟踪器/桅杆不支持 enable 而整批失败。
+        if has_all_alias or covers_full_inventory:
+            requested_actions = action if isinstance(action, list) else [action]
+            unique_actions = {
+                item for item in requested_actions if isinstance(item, str) and item
+            }
+            if (
+                len(unique_actions) != 1
+                or any(not isinstance(item, str) or not item for item in requested_actions)
+            ):
+                return ActionResponse(
+                    action=Action.RESPONSE,
+                    result=json.dumps(
+                        {"error": "所有设备指令只能执行一个统一动作"},
+                        ensure_ascii=False,
+                    ),
+                    response="所有设备请使用同一个操作",
+                )
+
+            all_action = next(iter(unique_actions))
+            targets = vc.targets_for_all(all_action)
+            if not targets:
+                logger.bind(tag=TAG).warning(
+                    f"[vehicle_control] 所有设备均不支持动作: {all_action}"
+                )
+                return ActionResponse(
+                    action=Action.RESPONSE,
+                    result=json.dumps(
+                        {"error": f"所有设备均不支持动作 {all_action}"},
+                        ensure_ascii=False,
+                    ),
+                    response="当前没有设备支持该操作",
+                )
+            actions = [all_action] * len(targets)
+            logger.bind(tag=TAG).info(
+                f"[vehicle_control] 所有设备动作组展开: action={all_action}, "
+                f"targets={targets}"
             )
 
         if len(actions) != len(targets):
@@ -433,15 +476,6 @@ def vehicle_control(
                 ensure_ascii=False,
             ),
             response=response,
-        )
-
-    # ── 单设备指令 ────────────────────────────────────────────────────────────
-    if isinstance(target, str) and target.lower() == "all":
-        logger.bind(tag=TAG).warning("[vehicle_control] 拒绝 target=all")
-        return ActionResponse(
-            action=Action.RESPONSE,
-            result=json.dumps({"error": "禁止使用 target=all"}, ensure_ascii=False),
-            response="请明确需要控制的设备",
         )
 
     return _execute_single(conn, vc, target, action, params)

@@ -1,0 +1,32 @@
+[Unit]
+Description=Scout Monitor 1501 Vehicle Control
+Wants=display-manager.service
+After=local-fs.target display-manager.service
+Before=MediaServer.service monitor.service serial.service web.service zmq.service voice-assistant.service
+
+[Service]
+Type=simple
+User=ztl
+Group=ztl
+WorkingDirectory=/opt/jw/vehicle-control-server/binr
+Environment=HOME=/home/ztl
+Environment=USER=ztl
+Environment=DISPLAY=:0
+Environment=XAUTHORITY=/run/user/1000/gdm/Xauthority
+Environment=XDG_RUNTIME_DIR=/run/user/1000
+Environment=DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus
+ExecStartPre=/usr/bin/test -x /opt/jw/vehicle-control-server/binr/ScoutMonitor_1501.sh
+ExecStartPre=/usr/bin/test -x /opt/jw/vehicle-control-server/binr/gdData
+ExecStartPre=/usr/bin/test -f /opt/jw/vehicle-control-server/binr/1501/libOpticalControl.so
+ExecStartPre=/usr/bin/test -f /opt/jw/vehicle-control-server/binr/1501/GDServoControl.xml
+ExecStartPre=/bin/bash -c 'for i in $(seq 1 90); do /usr/bin/xdpyinfo -display :0 >/dev/null 2>&1 && exit 0; sleep 1; done; echo "等待 X11 桌面就绪超时" >&2; exit 1'
+ExecStart=/bin/bash /opt/jw/vehicle-control-server/binr/ScoutMonitor_1501.sh
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=20
+KillMode=control-group
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

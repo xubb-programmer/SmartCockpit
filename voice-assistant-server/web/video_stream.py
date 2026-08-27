@@ -4,12 +4,17 @@ import asyncio
 import json
 import shutil
 from contextlib import suppress
+from fractions import Fraction
 from urllib.parse import urlsplit
 
 from aiohttp import WSMsgType, web
 
 SUPPORTED_SCHEMES = {"rtsp", "rtsps", "rtmp", "rtmps"}
 MAX_STREAM_SESSIONS = 4
+SMOOTH_MAX_WIDTH = 1280
+SMOOTH_MAX_HEIGHT = 720
+SMOOTH_MAX_FPS = 30.0
+FRAGMENT_DURATION_US = 150_000
 
 
 def validate_stream_url(value):
@@ -46,6 +51,64 @@ def h264_codec_string(profile, level):
     except (TypeError, ValueError):
         return None
     return f"avc1.{prefix}{level_byte}"
+
+
+def parse_frame_rate(value):
+    try:
+        rate = float(Fraction(str(value)))
+    except (ValueError, ZeroDivisionError):
+        return 0.0
+    return rate if 0 < rate < 240 else 0.0
+
+
+def smooth_dimensions(width, height):
+    try:
+        width = int(width)
+        height = int(height)
+    except (TypeError, ValueError):
+        return None, None
+    if width <= 0 or height <= 0:
+        return None, None
+    scale = min(1.0, SMOOTH_MAX_WIDTH / width, SMOOTH_MAX_HEIGHT / height)
+    target_width = max(2, int(width * scale) // 2 * 2)
+    target_height = max(2, int(height * scale) // 2 * 2)
+    return target_width, target_height
+
+
+def build_stream_plan(probe):
+    source_codec = str(probe.get("codec_name", "")).lower()
+    source_mime_codec = h264_codec_string(probe.get("profile"), probe.get("level"))
+    source_width = probe.get("width")
+    source_height = probe.get("height")
+    target_width, target_height = smooth_dimensions(source_width, source_height)
+    source_fps = parse_frame_rate(probe.get("avg_frame_rate")) or parse_frame_rate(
+        probe.get("r_frame_rate")
+    )
+    output_fps = min(source_fps or 25.0, SMOOTH_MAX_FPS)
+    oversized = (
+        target_width is not None
+        and target_height is not None
+        and (target_width != int(source_width) or target_height != int(source_height))
+    )
+    high_frame_rate = source_fps > SMOOTH_MAX_FPS + 0.5
+    transcode = (
+        source_codec != "h264"
+        or not source_mime_codec
+        or oversized
+        or high_frame_rate
+    )
+    return {
+        "source_codec": source_codec or "unknown",
+        "source_mime_codec": source_mime_codec,
+        "source_width": source_width,
+        "source_height": source_height,
+        "source_fps": source_fps,
+        "output_width": target_width if transcode else source_width,
+        "output_height": target_height if transcode else source_height,
+        "output_fps": output_fps if transcode else source_fps,
+        "transcode": transcode,
+        "codec": "avc1.42E01F" if transcode else source_mime_codec,
+    }
 
 
 class VideoStreamBridge:
@@ -99,26 +162,31 @@ class VideoSession:
         if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
             raise ValueError("服务器未安装 ffmpeg/ffprobe，无法播放视频")
         probe = await self._probe(url)
-        source_codec = probe.get("codec_name", "").lower()
-        source_mime_codec = h264_codec_string(probe.get("profile"), probe.get("level"))
-        transcode = source_codec != "h264" or not source_mime_codec
+        plan = build_stream_plan(probe)
+        transcode = plan["transcode"]
         print(
             f"[INFO] 视频流开始: {masked_stream_url(url)} "
-            f"({source_codec or '未知编码'} -> {'H.264 转码' if transcode else 'H.264 直通'})",
+            f"({plan['source_codec']} {plan['source_width']}x{plan['source_height']} "
+            f"-> {'H.264 低延时转码' if transcode else 'H.264 低延时直通'} "
+            f"{plan['output_width']}x{plan['output_height']})",
             flush=True,
         )
         self.process = await asyncio.create_subprocess_exec(
-            *self._command(url, transcode),
+            *self._command(url, plan),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
         await self.socket.send_json({
             "type": "stream-started",
-            "codec": "avc1.42E01E" if transcode else source_mime_codec,
-            "sourceCodec": source_codec or "unknown",
+            "codec": plan["codec"],
+            "sourceCodec": plan["source_codec"],
             "transcoding": transcode,
-            "width": probe.get("width"),
-            "height": probe.get("height"),
+            "width": plan["output_width"],
+            "height": plan["output_height"],
+            "sourceWidth": plan["source_width"],
+            "sourceHeight": plan["source_height"],
+            "fps": plan["output_fps"],
+            "latencyMode": "smooth",
         })
         self.tasks = [
             asyncio.create_task(self._relay()),
@@ -150,7 +218,8 @@ class VideoSession:
             command.extend(["-rtsp_transport", "tcp"])
         command.extend([
             "-select_streams", "v:0", "-show_entries",
-            "stream=codec_name,profile,level,width,height", "-of", "json", url,
+            "stream=codec_name,profile,level,width,height,r_frame_rate,avg_frame_rate",
+            "-of", "json", url,
         ])
         process = await asyncio.create_subprocess_exec(
             *command, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
@@ -170,28 +239,60 @@ class VideoSession:
             raise ValueError("视频源中没有可用的视频轨道")
         return streams[0]
 
-    def _command(self, url, transcode):
-        command = ["ffmpeg", "-hide_banner", "-loglevel", "warning", "-fflags", "nobuffer"]
-        if urlsplit(url).scheme.lower().startswith("rtsp"):
-            command.extend(["-rtsp_transport", "tcp"])
-        command.extend(["-i", url, "-map", "0:v:0", "-an"])
-        if transcode:
+    def _command(self, url, plan):
+        scheme = urlsplit(url).scheme.lower()
+        command = [
+            "ffmpeg", "-hide_banner", "-loglevel", "warning",
+            "-fflags", "nobuffer+genpts+discardcorrupt",
+            "-flags", "low_delay",
+            "-probesize", "512000",
+            "-analyzeduration", "500000",
+        ]
+        if scheme.startswith("rtsp"):
+            command.extend([
+                "-rtsp_transport", "tcp",
+                "-reorder_queue_size", "16",
+                "-max_delay", "300000",
+                "-buffer_size", "1048576",
+            ])
+        elif scheme.startswith("rtmp"):
+            command.extend(["-rtmp_live", "live", "-rtmp_buffer", "100"])
+        command.extend(["-i", url, "-map", "0:v:0", "-an", "-sn", "-dn"])
+        if plan["transcode"]:
+            filters = []
+            if plan["output_width"] and plan["output_height"]:
+                filters.append(
+                    f"scale={plan['output_width']}:{plan['output_height']}:flags=bilinear"
+                )
+            if plan["output_fps"]:
+                filters.append(f"fps={plan['output_fps']:g}")
+            if filters:
+                command.extend(["-vf", ",".join(filters)])
+            keyframe_interval = max(10, round((plan["output_fps"] or 25.0) / 2))
             command.extend([
                 "-c:v", "libx264", "-preset", "ultrafast", "-tune", "zerolatency",
-                "-profile:v", "baseline", "-pix_fmt", "yuv420p", "-g", "25",
+                "-profile:v", "baseline", "-level:v", "3.1", "-pix_fmt", "yuv420p",
+                "-g", str(keyframe_interval), "-keyint_min", str(keyframe_interval),
+                "-sc_threshold", "0", "-bf", "0", "-refs", "1",
+                "-crf", "23", "-maxrate", "2400k", "-bufsize", "480k", "-threads", "4",
             ])
         else:
             command.extend(["-c:v", "copy"])
         command.extend([
-            "-movflags", "frag_keyframe+empty_moov+default_base_moof",
-            "-frag_duration", "500000", "-f", "mp4", "pipe:1",
+            "-movflags",
+            "frag_keyframe+empty_moov+default_base_moof+omit_tfhd_offset+negative_cts_offsets+delay_moov",
+            "-frag_duration", str(FRAGMENT_DURATION_US),
+            "-min_frag_duration", "75000",
+            "-video_track_timescale", "90000",
+            "-flush_packets", "1",
+            "-f", "mp4", "pipe:1",
         ])
         return command
 
     async def _relay(self):
         try:
             while self.process and self.process.stdout:
-                chunk = await self.process.stdout.read(64 * 1024)
+                chunk = await self.process.stdout.read(256 * 1024)
                 if not chunk:
                     break
                 await self.socket.send_bytes(chunk)

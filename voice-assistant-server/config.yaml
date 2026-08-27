@@ -379,6 +379,61 @@ ASR:
     model_dir: models/sherpa-onnx-paraformer-zh-small-2024-03-09
     output_dir: tmp/
     model_type: paraformer
+  SherpaHotwordASR:
+    # 中文 Transducer 热词识别，适用于“周扫”等车载专用词
+    type: sherpa_onnx_local
+    model_dir: models/sherpa-onnx-conformer-zh-stateless2-2023-05-23
+    output_dir: tmp/
+    model_type: transducer
+    encoder: encoder-epoch-99-avg-1.onnx
+    decoder: decoder-epoch-99-avg-1.onnx
+    joiner: joiner-epoch-99-avg-1.onnx
+    tokens: tokens.txt
+    decoding_method: modified_beam_search
+    modeling_unit: cjkchar
+    hotwords_file: config/hotwords_cn.txt
+    hotwords_score: 2.0
+    max_active_paths: 4
+    num_threads: 2
+    # 仅在独立词或车辆控制上下文中纠正，避免误伤“市场行情”等普通语句
+    text_corrections:
+      - source: 大市场
+        target: 大视场
+        contexts: [切换, 调到, 换到, 换成, 白光, 热像, 相机, 摄像机]
+      - source: 小市场
+        target: 小视场
+        contexts: [切换, 调到, 换到, 换成, 白光, 热像, 相机, 摄像机]
+      - source: 凝漂
+        target: 零漂
+        contexts: [稳台, 转台, 云台, 校正]
+      - source: 乙肝
+        target: 桅杆
+        match_exact: false
+        contexts: [停止, 驻车, 行车, 展开, 撤收, 升, 降, 单次, 调平, 侦察]
+      - source: 为甘
+        target: 桅杆
+        match_exact: false
+        contexts: [停止, 驻车, 行车, 展开, 撤收, 升, 降, 单次, 调平, 侦察]
+      - source: 单单单次
+        target: 单次
+        match_exact: false
+        contexts: [桅杆, 乙肝, 为甘, 调平, 吊瓶]
+      - source: 单单次
+        target: 单次
+        match_exact: false
+        contexts: [桅杆, 乙肝, 为甘, 调平, 吊瓶]
+      - source: 吊瓶
+        target: 调平
+        match_exact: false
+        contexts: [单次, 桅杆]
+      - source: 上殿
+        target: 上电
+        match_exact: false
+        contexts: [白光, 热像, 红外, 稳台, 转台, 云台, 激光, 所有设备, 全部设备]
+      - source: 同外
+        target: 红外
+        match_exact: false
+        contexts: [上电, 下电, 打开, 关闭, 视场, 放大, 缩小, 聚焦, 调焦, 十字丝, 亮度, 增强, 极性, 对比度, 校正]
   DoubaoASR:
     # 可以在这里申请相关Key等信息
     # https://console.volcengine.com/speech/app

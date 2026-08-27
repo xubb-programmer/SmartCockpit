@@ -6,7 +6,7 @@ vehicle_control 车型能力描述数据类。
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, List
 
 
@@ -21,6 +21,7 @@ class DeviceSpec:
 class VehicleControlProfile:
     vehicle_id: str                  # 车辆标识
     devices: Dict[str, DeviceSpec]   # device_id → DeviceSpec
+    all_targets: Dict[str, List[str]] = field(default_factory=dict)
 
     # ──────────────────────────────────────────────────────────────
     @classmethod
@@ -40,9 +41,17 @@ class VehicleControlProfile:
                 actions=spec.get("actions") or [],
             )
 
+        all_targets: Dict[str, List[str]] = {}
+        for action, targets in (vc.get("all_targets") or {}).items():
+            if isinstance(targets, list):
+                all_targets[str(action)] = [
+                    str(target) for target in targets if isinstance(target, str)
+                ]
+
         return cls(
             vehicle_id=vehicle_id,
             devices=devices,
+            all_targets=all_targets,
         )
 
     # ──────────────────────────────────────────────────────────────
@@ -65,3 +74,14 @@ class VehicleControlProfile:
         if spec and spec.cn_names:
             return spec.cn_names[0]
         return device_id
+
+    def targets_for_all(self, action: str) -> List[str]:
+        """返回“所有设备”执行指定动作时应控制的设备，保持配置顺序。"""
+        configured = self.all_targets.get(action)
+        candidates = configured if configured is not None else list(self.devices.keys())
+
+        targets = []
+        for device_id in candidates:
+            if device_id not in targets and self.is_valid_action(device_id, action):
+                targets.append(device_id)
+        return targets

@@ -107,11 +107,11 @@ start_detached() {
 
     rm -f "${pid_file}"
     if command -v setsid >/dev/null 2>&1; then
-        nohup setsid bash -c 'echo $$ > "$1"; shift; exec "$@"' _ "${pid_file}" "$@" \
+        nohup setsid bash -c 'exec 9>&-; echo $$ > "$1"; shift; exec "$@"' _ "${pid_file}" "$@" \
             > "${log_file}" 2>&1 < /dev/null &
     else
         warn "未找到 setsid，后台服务可能仍会受到终端 Ctrl+C 影响"
-        nohup bash -c 'echo $$ > "$1"; shift; exec "$@"' _ "${pid_file}" "$@" \
+        nohup bash -c 'exec 9>&-; echo $$ > "$1"; shift; exec "$@"' _ "${pid_file}" "$@" \
             > "${log_file}" 2>&1 < /dev/null &
     fi
 

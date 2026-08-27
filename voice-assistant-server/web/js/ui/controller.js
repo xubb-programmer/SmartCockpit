@@ -325,12 +325,9 @@ class UIController {
     updateRecordButtonState(isRecording, seconds = 0) {
         const recordBtn = document.getElementById('recordBtn');
         if (recordBtn) {
-            if (isRecording) {
-                recordBtn.querySelector('.btn-text').textContent = `录音中`;
-                recordBtn.classList.add('recording');
-            } else {
-                recordBtn.querySelector('.btn-text').textContent = '录音';
-                recordBtn.classList.remove('recording');
+            if (recordBtn.classList.contains('recording') !== isRecording) {
+                recordBtn.querySelector('.btn-text').textContent = isRecording ? '录音中' : '录音';
+                recordBtn.classList.toggle('recording', isRecording);
             }
             // Only enable button when microphone is available
             recordBtn.disabled = window.microphoneAvailable === false;

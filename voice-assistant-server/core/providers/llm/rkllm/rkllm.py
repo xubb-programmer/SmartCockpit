@@ -97,23 +97,27 @@ class LLMProvider(LLMProviderBase):
     # ══════════════════════════════════════════════════════
 
     @staticmethod
-    def _extract_tool_call(text):
+    def _extract_tool_calls(text):
         """
         从模型输出中提取工具调用 JSON，支持三种格式：
           1. <tool_call>{"name":..., "arguments":...}</tool_call>
           2. {"name":..., "arguments":...}  （裸 JSON）
           3. function_name{"arg1":"val1",...}  （RKLLM 原生格式）
-        返回标准 JSON 字符串，或 None。
+        返回标准 JSON 字符串列表；标签格式可返回多个调用。
         """
         # 格式1: <tool_call> 标签包裹
-        m = re.search(r'<tool_call>\s*(.*?)\s*</tool_call>', text, re.DOTALL)
-        if m:
-            content = m.group(1).strip()
+        tagged_calls = []
+        for match in re.finditer(
+            r'<tool_call>\s*(.*?)\s*</tool_call>', text, re.DOTALL
+        ):
+            content = match.group(1).strip()
             try:
                 json.loads(content)
-                return content
+                tagged_calls.append(content)
             except json.JSONDecodeError:
-                pass
+                continue
+        if tagged_calls:
+            return tagged_calls
 
         # 格式2: 裸 JSON {"name":...}
         start = text.find('{"name"')
@@ -131,7 +135,7 @@ class LLMProvider(LLMProviderBase):
                         try:
                             data = json.loads(candidate)
                             if "name" in data and "arguments" in data:
-                                return candidate
+                                return [candidate]
                         except json.JSONDecodeError:
                             break
 
@@ -142,13 +146,22 @@ class LLMProvider(LLMProviderBase):
             try:
                 args = json.loads(args_str)
                 if isinstance(args, dict):
-                    return json.dumps(
-                        {"name": func_name, "arguments": args}, ensure_ascii=False
-                    )
+                    return [
+                        json.dumps(
+                            {"name": func_name, "arguments": args},
+                            ensure_ascii=False,
+                        )
+                    ]
             except json.JSONDecodeError:
                 pass
 
-        return None
+        return []
+
+    @staticmethod
+    def _extract_tool_call(text):
+        """兼容旧调用方：返回模型输出中的第一个工具调用。"""
+        tool_calls = LLMProvider._extract_tool_calls(text)
+        return tool_calls[0] if tool_calls else None
 
     # ══════════════════════════════════════════════════════
     #  buffer 最终处理（stop / 流结束 统一入口）
@@ -162,10 +175,15 @@ class LLMProvider(LLMProviderBase):
         if not buffer:
             return None
 
-        tc_json = self._extract_tool_call(buffer)
-        if tc_json:
-            logger.bind(tag=TAG).info(f"[TC] {source}提取工具调用: {tc_json[:80]}")
-            return f"<tool_call>{tc_json}</tool_call>", None
+        tool_calls = self._extract_tool_calls(buffer)
+        if tool_calls:
+            normalized = "".join(
+                f"<tool_call>{tool_call}</tool_call>" for tool_call in tool_calls
+            )
+            logger.bind(tag=TAG).info(
+                f"[TC] {source}提取 {len(tool_calls)} 个工具调用: {normalized[:80]}"
+            )
+            return normalized, None
 
         if _has_chinese(buffer):
             return buffer, None

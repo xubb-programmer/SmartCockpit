@@ -1801,3 +1801,119 @@ body.video-mode .chat-container {
         font-size: 10px;
     }
 }
+
+/* ==================== 嵌入式渲染兼容层 ==================== */
+/*
+ * ARM/X11 图形栈对持续阴影重绘和背景模糊的支持并不稳定。
+ * 这里保留界面结构和交互，仅使用可预测的静态绘制效果。
+ */
+.status-indicator,
+.chat-ipt input,
+.message-bubble,
+.control-bar,
+.modal,
+#fileProtocolWarning,
+.file-protocol-overlay,
+.audio-visualizer,
+.camera-container {
+    -webkit-backdrop-filter: none;
+    backdrop-filter: none;
+}
+
+.status-indicator {
+    background: rgba(18, 21, 27, 0.9);
+}
+
+.chat-ipt input {
+    background: rgba(35, 39, 42, 0.96);
+    transition: border-color 0.15s ease, background-color 0.15s ease;
+}
+
+.chat-message.user .message-bubble {
+    background: rgba(88, 101, 242, 0.92);
+}
+
+.control-bar {
+    background: rgba(35, 39, 42, 0.97);
+}
+
+.modal {
+    background: rgba(0, 0, 0, 0.84);
+}
+
+.modal-content {
+    border-radius: 8px;
+}
+
+.status-dot,
+.model-loading,
+.loading-char-float .main-char span,
+.loading-char-float .shadow-char,
+.chat-message,
+.message-bubble,
+.modal-content,
+#fileProtocolWarning,
+.file-protocol-overlay,
+.control-btn.recording,
+.camera-container.flip {
+    animation: none;
+}
+
+.control-btn {
+    transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.control-btn:hover,
+.control-btn:active,
+.help-cmd-btn:hover,
+.help-cmd-btn:active {
+    transform: none;
+}
+
+.control-btn.recording {
+    box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.75);
+}
+
+.help-cmd-btn {
+    transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.help-cmd-btn:hover {
+    box-shadow: none;
+}
+
+.video-stage {
+    top: 0;
+    right: 0;
+    bottom: 44px;
+    left: 0;
+    margin: auto;
+    transform: none;
+    border-radius: 0;
+    box-shadow: none;
+}
+
+.video-stage:fullscreen {
+    inset: 0;
+    margin: 0;
+}
+
+@media (max-width: 768px) {
+    .video-stage {
+        top: 58px;
+        right: auto;
+        bottom: auto;
+        left: 12px;
+        margin: 0;
+    }
+}
+
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+    }
+}

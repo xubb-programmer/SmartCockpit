@@ -13,7 +13,7 @@ prompt: |
   每个设备只能使用该设备对应的动作，严格按中文=action对照选取，不可混用：
   白光(vis_cam)：上电/打开=enable 下电/关闭=disable 大视场=view_large 小视场=view_small 放大=zoom_in 缩小=zoom_out 自动聚焦=focus_auto 调焦加=focus_in 调焦减=focus_out 开十字丝=cross_show 关十字丝=cross_hide 亮度加=brightness_up 亮度减=brightness_down 开增强=enhance_on 关增强=enhance_off 开透雾=fog_on 关透雾=fog_off 数字变倍=digital_zoom
   热像(ir_cam)：上电/打开=enable 下电/关闭=disable 大视场=view_large 小视场=view_small 放大=zoom_in 缩小=zoom_out 自动聚焦=focus_auto 调焦加=focus_in 调焦减=focus_out 开十字丝=cross_show 关十字丝=cross_hide 亮度加=brightness_up 亮度减=brightness_down 开增强=enhance_on 关增强=enhance_off 黑极性=polarity_black 白极性=polarity_white 对比度加=contrast_up 对比度减=contrast_down 自动=auto 图像校正=gamma_correction 场景校正=scene_correction
-  转台(gimbal)：打开=enable 关闭=disable 回零=zero_return 零漂=zero_drift 全周扫描=scan_circle 停止扫描=scan_stop
+  稳台/转台(gimbal)：打开=enable 关闭=disable 回零=zero_return 零漂=zero_drift 全周扫描=scan_circle 停止扫描=scan_stop
   激光(laser)：打开=enable 关闭=disable
   跟踪(tracker)：开检测/开识别=detect_on 关检测/关识别=detect_off 开跟踪=track_on 关跟踪=track_off
   桅杆(mast)：驻车展开=park_work 行车展开=drive_work 一键展开=onekey_work 一键撤收/撤收=end_work 停止=stop_work 升桅=mast_raise 降桅=mast_lower 单次调平=single_level 开始侦察=recon_start
@@ -25,7 +25,7 @@ prompt: |
   【示例】
   白光缩小→<tool_call>{"name":"vehicle_control","arguments":{"target":"vis_cam","action":"zoom_out"}}</tool_call>
   热像相机切换成白热→<tool_call>{"name":"vehicle_control","arguments":{"target":"ir_cam","action":"polarity_white"}}</tool_call>
-  转台回零→<tool_call>{"name":"vehicle_control","arguments":{"target":"gimbal","action":"zero_return"}}</tool_call>
+  稳台回零→<tool_call>{"name":"vehicle_control","arguments":{"target":"gimbal","action":"zero_return"}}</tool_call>
   激光关闭→<tool_call>{"name":"vehicle_control","arguments":{"target":"laser","action":"disable"}}</tool_call>
   开识别→<tool_call>{"name":"vehicle_control","arguments":{"target":"tracker","action":"detect_on"}}</tool_call>
   桅杆一键展开→<tool_call>{"name":"vehicle_control","arguments":{"target":"mast","action":"onekey_work"}}</tool_call>
@@ -36,8 +36,9 @@ prompt: |
   单设备：<tool_call>{"name":"vehicle_control","arguments":{"target":"laser","action":"enable"}}</tool_call>
   多设备同动作用数组：<tool_call>{"name":"vehicle_control","arguments":{"target":["vis_cam","ir_cam"],"action":"enable"}}</tool_call>
   多设备同动作仅当每个设备都支持该动作时调用；任一设备不支持该动作时，不调用工具。
-  所有设备上电/下电仅指支持整机电源操作的设备，固定使用["vis_cam","ir_cam","gimbal","laser"]。
-  禁止使用target=all。
+  所有设备上电→<tool_call>{"name":"vehicle_control","arguments":{"target":"all","action":"enable"}}</tool_call>
+  所有设备下电→<tool_call>{"name":"vehicle_control","arguments":{"target":"all","action":"disable"}}</tool_call>
+  target=all由系统按车型展开，只控制支持整机电源操作的设备。
   同设备不同动作分开调用：
   <tool_call>{"name":"vehicle_control","arguments":{"target":"tracker","action":"track_on"}}</tool_call><tool_call>{"name":"vehicle_control","arguments":{"target":"tracker","action":"detect_on"}}</tool_call>
   同设备不同动作必须按用户说出的先后顺序输出多个完整<tool_call>。
@@ -48,12 +49,21 @@ prompt: |
 
   只传用户明确说出的值，未说出的不传。
   白光数字变倍4倍→<tool_call>{"name":"vehicle_control","arguments":{"target":"vis_cam","action":"digital_zoom","params":{"zoom_level":"4"}}}</tool_call>
-  转台顺时针周扫3圈→<tool_call>{"name":"vehicle_control","arguments":{"target":"gimbal","action":"scan_circle","params":{"direction":"cw","count":"3"}}}</tool_call>
+  稳台顺时针周扫3圈→<tool_call>{"name":"vehicle_control","arguments":{"target":"gimbal","action":"scan_circle","params":{"direction":"cw","count":"3"}}}</tool_call>
 
 
   【状态查询】查询设备状态用vehicle_status，用户询问状态/是否开机时调用：
   白光什么状态→<tool_call>{"name":"vehicle_status","arguments":{"target":"vis_cam"}}</tool_call>
   所有设备什么状态→<tool_call>{"name":"vehicle_status","arguments":{}}</tool_call>
+
+  【功能咨询】用户询问“有哪些功能/能做什么/支持哪些操作”时，直接回答下列中文说明，不调用任何工具：
+  白光：开关机、大小视场、放大缩小、聚焦调焦、十字丝、亮度、增强、透雾、数字变倍。
+  热像：开关机、大小视场、放大缩小、聚焦调焦、十字丝、亮度、增强、黑白极性、对比度、图像和场景校正。
+  稳台：开关机、回零、零漂、全周扫描和停止扫描。
+  激光：开机和关机。
+  跟踪：目标检测、识别和跟踪开关。
+  桅杆：驻车展开、行车展开、一键展开撤收、升降桅、单次调平和目标侦察。
+  当前白光有哪些功能→白光支持开关机、视场、变焦、聚焦、十字丝、亮度、增强、透雾和数字变倍。
 
   【其他工具】
   分析前方画面/看看前面有什么：<tool_call>{"name":"vision_analyze","arguments":{"question":"描述一下看到的物品"}}</tool_call>
@@ -68,15 +78,17 @@ prompt: |
   2. params只传用户明确说出的值，不编造
   3. 日常闲聊不调用工具直接回复；再见/告别调用handle_exit_intent
   4. 回复用中文设备名，不用英文
+  5. 设备功能/能力/支持操作的咨询只回复文字，不调用vehicle_control或vehicle_status
 
 
 tool_calling_rules: |
 
   <tool_calling>
   控制设备时必须调用vehicle_control，查询设备状态调用vehicle_status，分析前方画面调用vision_analyze，播放音乐调用play_music，查时间调用get_datetime，告别调用handle_exit_intent。
+  询问设备功能、能力或支持哪些操作时直接回答文字，不调用任何工具。
   重要：调用工具时只输出<tool_call>标签，不要输出其他文字。
   多设备执行同一动作时target用数组，如["vis_cam","ir_cam"]。
-  任一设备不支持该动作时，不调用工具；禁止使用target=all。
+  所有设备执行上电或下电时target使用all；其他多设备组合中任一设备不支持该动作时，不调用工具。
   </tool_calling>
 
 functions:
@@ -93,6 +105,11 @@ vehicle_id: "z1_001"
 vehicle_control:
   # 设备控制端 HTTP 地址（留空则 print 模拟）
   cmd_url: "http://{local_ip}:9000/command"
+
+  # “所有设备”是动作相关的逻辑组，不包含没有整机电源动作的跟踪器和桅杆。
+  all_targets:
+    enable: [vis_cam, ir_cam, gimbal, laser]
+    disable: [vis_cam, ir_cam, gimbal, laser]
 
   # 设备定义：target → {cn_names, actions}
   # cn_names: 供语音回复生成中文设备名
@@ -145,7 +162,7 @@ vehicle_control:
         - gamma_correction
         - scene_correction
     gimbal:
-      cn_names: ["转台", "云台"]
+      cn_names: ["稳台", "转台", "云台"]
       actions:
         - enable
         - disable

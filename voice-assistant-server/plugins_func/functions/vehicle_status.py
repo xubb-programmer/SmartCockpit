@@ -28,7 +28,7 @@ vehicle_status_function_desc = {
     "function": {
         "name": "vehicle_status",
         "description": (
-            "查询车辆搭载设备的当前状态（白光摄像机/热像仪/转台/激光器/跟踪器等）。"
+            "查询车辆搭载设备的当前状态（白光摄像机/热像仪/稳台/转台/激光器/跟踪器等）。"
             "用户询问设备状态、是否开机、当前情况时调用。"
             "控制设备时不调用此工具，应使用 vehicle_control。"
         ),
