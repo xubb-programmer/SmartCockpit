@@ -5,6 +5,77 @@ from collections.abc import Mapping
 from config.manage_api_client import init_service, get_server_config, get_agent_models
 
 _VEHICLE_PROFILE_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+_TRUE_ENV_VALUES = {"1", "true", "yes", "on"}
+
+
+def _env_flag(name, default=False):
+    value = os.getenv(name)
+    if value is None:
+        return default
+    return value.strip().lower() in _TRUE_ENV_VALUES
+
+
+def _remove_vision_prompt_directives(value):
+    """移除仅在视觉模式下有效的短协议，避免文本模型生成 @V。"""
+    if not isinstance(value, str):
+        return value
+
+    lines = []
+    for line in value.splitlines(keepends=True):
+        stripped = line.strip()
+        if stripped.startswith(("视觉：@V", "视觉:@V")):
+            continue
+        lines.append(line)
+
+    result = "".join(lines)
+    for fragment in (
+        "明确要求分析画面用@V；",
+        "明确要求分析画面用@V;",
+        "视觉分析输出@V，",
+        "视觉分析输出@V,",
+        "视觉分析输出@V；",
+        "视觉分析输出@V;",
+    ):
+        result = result.replace(fragment, "")
+    return result
+
+
+def _apply_runtime_capabilities(config):
+    """根据启动参数裁剪工具、提示词和能力说明。"""
+    vision_enabled = _env_flag("VOICE_ASSISTANT_VISION_ENABLED", False)
+    runtime_capabilities = config.setdefault("runtime_capabilities", {})
+    runtime_capabilities["vision_enabled"] = vision_enabled
+
+    if vision_enabled:
+        print("[Capabilities] 视觉分析已启用")
+        return config
+
+    intent_key = config.get("selected_module", {}).get("Intent", "function_call")
+    intent_config = config.get("Intent", {}).get(intent_key, {})
+    functions = intent_config.get("functions", [])
+    if isinstance(functions, (list, tuple)):
+        intent_config["functions"] = [
+            name for name in functions if name != "vision_analyze"
+        ]
+
+    config["prompt"] = _remove_vision_prompt_directives(config.get("prompt"))
+    config["tool_calling_rules"] = _remove_vision_prompt_directives(
+        config.get("tool_calling_rules")
+    )
+
+    summary = str(config.get("capability_summary") or "")
+    for fragment in (
+        "、分析前方画面",
+        "，分析前方画面",
+        "分析前方画面、",
+        "分析前方画面，",
+        "分析前方画面",
+    ):
+        summary = summary.replace(fragment, "")
+    config["capability_summary"] = summary.replace("、。", "。").strip()
+
+    print("[Capabilities] 视觉分析未启用，已移除 vision_analyze 工具")
+    return config
 
 
 def get_project_dir():
@@ -53,6 +124,9 @@ def load_config():
 
     # ── 车型 Profile 覆盖 ──────────────────────────────────────
     config = _apply_vehicle_profile(config)
+
+    # ── 启动模式能力裁剪 ───────────────────────────────────────
+    config = _apply_runtime_capabilities(config)
 
     # 缓存配置
     cache_manager.set(CacheType.CONFIG, "main_config", config)
@@ -189,7 +263,7 @@ def _resolve_vehicle_profile_path(profile_name):
 def _apply_vehicle_profile(config):
     """
     如果配置中指定了 vehicle_profile，从 data/vehicle_profiles/<name>.yaml
-    加载车型专属配置并覆盖 prompt / prompt_template / tool_calling_rules / functions。
+    加载车型专属配置并覆盖提示词、能力摘要、工具白名单和控制参数。
     """
     profile_name = config.get("vehicle_profile")
     if not profile_name:
@@ -211,7 +285,12 @@ def _apply_vehicle_profile(config):
     print(f"[Profile] 加载车型配置: {display_name} ({profile_path})")
 
     # 覆盖提示词相关字段
-    for key in ("prompt_template", "prompt", "tool_calling_rules"):
+    for key in (
+        "prompt_template",
+        "prompt",
+        "tool_calling_rules",
+        "capability_summary",
+    ):
         if key in profile:
             config[key] = profile[key]
 

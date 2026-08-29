@@ -17,6 +17,12 @@ from aiohttp import ClientSession, ClientTimeout, WSMsgType, web
 
 from https_server import generate_self_signed_cert
 from video_stream import VideoStreamBridge
+from vision_frame_store import (
+    MAX_VISION_FRAME_BYTES,
+    VISION_FRAME_PATH,
+    validate_vision_frame,
+    write_vision_frame_atomic,
+)
 
 
 HOP_BY_HOP_HEADERS = {
@@ -37,7 +43,6 @@ WEBSOCKET_HEADERS = {
     "sec-websocket-extensions",
     "sec-websocket-protocol",
 }
-
 
 def copy_proxy_headers(headers, *, websocket=False):
     skipped = HOP_BY_HOP_HEADERS | (WEBSOCKET_HEADERS if websocket else set())
@@ -92,10 +97,18 @@ def rewrite_ota_json(request, response_headers, body):
 
 
 class HttpsGateway:
-    def __init__(self, web_dir, http_target, ws_target):
+    def __init__(
+        self,
+        web_dir,
+        http_target,
+        ws_target,
+        vision_frame_path=VISION_FRAME_PATH,
+    ):
         self.web_dir = os.path.realpath(web_dir)
         self.http_target = http_target.rstrip("/")
         self.ws_target = ws_target.rstrip("/")
+        self.vision_frame_path = os.path.realpath(vision_frame_path)
+        self.vision_frame_upload_count = 0
         self.session = None
 
     async def start_session(self, app):
@@ -180,6 +193,52 @@ class HttpsGateway:
 
         return client_ws
 
+    async def upload_video_frame(self, request):
+        content_length = request.content_length
+        if content_length is not None and content_length > MAX_VISION_FRAME_BYTES:
+            return web.json_response(
+                {"error": "图片超过 4 MB 限制"},
+                status=413,
+            )
+
+        frame_data = await request.read()
+        try:
+            validate_vision_frame(request.headers.get("Content-Type"), frame_data)
+        except ValueError as exc:
+            return web.json_response({"error": str(exc)}, status=400)
+
+        try:
+            frame_stat = await asyncio.to_thread(
+                write_vision_frame_atomic,
+                frame_data,
+                self.vision_frame_path,
+            )
+        except Exception as exc:
+            print(f"[ERROR] 保存视觉画面失败: {exc}", flush=True)
+            return web.json_response({"error": "保存视觉画面失败"}, status=500)
+
+        self.vision_frame_upload_count += 1
+        if self.vision_frame_upload_count == 1:
+            print(
+                f"[INFO] 已接收首张视觉画面: {self.vision_frame_path} "
+                f"({frame_stat.st_size} bytes)",
+                flush=True,
+            )
+        elif self.vision_frame_upload_count % 30 == 0:
+            print(
+                f"[INFO] 视觉画面持续更新: count={self.vision_frame_upload_count}, "
+                f"size={frame_stat.st_size} bytes",
+                flush=True,
+            )
+        return web.json_response(
+            {
+                "status": "ok",
+                "size": frame_stat.st_size,
+                "updated_at": frame_stat.st_mtime,
+            },
+            headers={"Cache-Control": "no-store"},
+        )
+
     async def _relay_websocket(self, source, target):
         async for msg in source:
             if msg.type == WSMsgType.TEXT:
@@ -226,6 +285,7 @@ def create_app(web_dir, http_target, ws_target):
     app.on_cleanup.append(video_bridge.close)
 
     app.router.add_get("/video/ws", video_bridge.websocket)
+    app.router.add_post("/video/frame", gateway.upload_video_frame)
     app.router.add_route("*", "/voice_assistant/v1", gateway.proxy_websocket)
     app.router.add_route("*", "/voice_assistant/v1/{tail:.*}", gateway.proxy_websocket)
     app.router.add_route("*", "/voice_assistant/{tail:.*}", gateway.proxy_http)

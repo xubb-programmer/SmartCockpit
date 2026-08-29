@@ -18,12 +18,20 @@ Miniconda3-*.sh
 
 # ── 超大模型文件（超过 GitHub LFS 2GB 限制，通过网盘/NAS 分发）──
 models/*.rkllm
+models/*.rknn
+models/**/*.rkllm
+models/**/*.rknn
+
+# ── RK3588 离线迁移包（按要求纳入私有 Git/LFS）───────────────
+!output/rk3588-migration-kit/**/*.tar.gz
+!output/rk3588-migration-kit/**/Miniconda3-*.sh
 
 # ── 临时文件 ─────────────────────────────────────────────────
 voice-assistant-server/tmp/
 *.log
 *.pid
 *.cache
+!output/rk3588-migration-kit/**/*.cache
 
 # ── 运行时覆盖配置（用户本地配置，不入库）─────────────────────
 voice-assistant-server/data/.config.yaml

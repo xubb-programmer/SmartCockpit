@@ -19,6 +19,14 @@ class ServerPluginExecutor(ToolExecutor):
         self, conn: "ConnectionHandler", tool_name: str, arguments: Dict[str, Any]
     ) -> ActionResponse:
         """执行服务端插件工具"""
+        if not self.has_tool(tool_name):
+            response = (
+                "当前未启用视觉分析功能。"
+                if tool_name == "vision_analyze"
+                else f"插件函数 {tool_name} 未启用"
+            )
+            return ActionResponse(action=Action.NOTFOUND, response=response)
+
         func_item = all_function_registry.get(tool_name)
         if not func_item:
             return ActionResponse(
@@ -68,8 +76,10 @@ class ServerPluginExecutor(ToolExecutor):
             except TypeError:
                 config_functions = []
 
-        # 合并所有需要的函数
-        all_required_functions = list(set(necessary_functions + config_functions))
+        # 合并所有需要的函数，保持配置顺序稳定，避免小模型看到的工具顺序抖动。
+        all_required_functions = list(
+            dict.fromkeys(config_functions + necessary_functions)
+        )
 
         for func_name in all_required_functions:
             func_item = all_function_registry.get(func_name)
@@ -97,4 +107,4 @@ class ServerPluginExecutor(ToolExecutor):
 
     def has_tool(self, tool_name: str) -> bool:
         """检查是否有指定的服务端插件工具"""
-        return tool_name in all_function_registry
+        return tool_name in self.get_tools()

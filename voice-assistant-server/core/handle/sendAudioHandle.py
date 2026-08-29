@@ -261,6 +261,41 @@ async def _do_send_audio(conn: "ConnectionHandler", opus_packet, flow_control):
         # 直接发送opus数据包
         await conn.websocket.send(opus_packet)
 
+    if packet_index == 0:
+        now = time.monotonic()
+        turn_started_at = getattr(conn, "current_turn_started_at", None)
+        if turn_started_at is not None:
+            elapsed_ms = (now - turn_started_at) * 1000
+            conn.logger.bind(tag=TAG).info(
+                f"[性能][端到端] 文本进入对话到首个音频帧={elapsed_ms:.0f}毫秒"
+            )
+        speech_ended_at = getattr(conn, "current_speech_ended_at", None)
+        vad_completed_at = getattr(conn, "current_vad_completed_at", None)
+        asr_completed_at = getattr(conn, "last_asr_completed_at", None)
+        if speech_ended_at is not None:
+            vad_ms = (
+                (vad_completed_at - speech_ended_at) * 1000
+                if vad_completed_at is not None
+                else -1
+            )
+            asr_ms = (
+                (asr_completed_at - vad_completed_at) * 1000
+                if vad_completed_at is not None and asr_completed_at is not None
+                else -1
+            )
+            post_asr_ms = (
+                (now - asr_completed_at) * 1000
+                if asr_completed_at is not None
+                else -1
+            )
+            conn.logger.bind(tag=TAG).info(
+                f"[性能][全链路] 停止说话到首个音频帧="
+                f"{(now - speech_ended_at) * 1000:.0f}毫秒，"
+                f"VAD句尾={vad_ms:.0f}毫秒，"
+                f"VAD完成到ASR完成={asr_ms:.0f}毫秒，"
+                f"ASR完成到首帧={post_asr_ms:.0f}毫秒"
+            )
+
     conn.tts_tx_packets = getattr(conn, "tts_tx_packets", 0) + 1
     conn.tts_tx_bytes = getattr(conn, "tts_tx_bytes", 0) + len(opus_packet)
     if conn.tts_tx_packets == 1 or conn.tts_tx_packets % 20 == 0:
@@ -285,6 +320,10 @@ async def send_tts_message(conn: "ConnectionHandler", state, text=None):
     if state == "start":
         conn.tts_tx_packets = 0
         conn.tts_tx_bytes = 0
+        conn.client_is_speaking = True
+        conn.ignore_audio_until = 0.0
+        conn.suppressed_audio_packets = 0
+        conn.reset_audio_states()
         conn.logger.bind(tag=TAG).info("[音频诊断][下行] TTS流开始")
 
     # TTS播放结束
@@ -322,11 +361,6 @@ async def send_tts_message(conn: "ConnectionHandler", state, text=None):
 
 async def send_stt_message(conn: "ConnectionHandler", text):
     """发送 STT 状态消息"""
-    end_prompt_str = conn.config.get("end_prompt", {}).get("prompt")
-    if end_prompt_str and end_prompt_str == text:
-        await send_tts_message(conn, "start")
-        return
-
     # 解析JSON格式，提取实际的用户说话内容
     display_text = text
     try:

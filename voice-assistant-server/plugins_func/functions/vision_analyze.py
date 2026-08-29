@@ -1,6 +1,7 @@
 import base64
 import tempfile
 import os
+import time
 from config.logger import setup_logging
 from plugins_func.register import register_function, ToolType, Action, ActionResponse
 from core.utils.vllm import create_instance
@@ -83,9 +84,7 @@ vision_analyze_desc = {
 
 # 战场态势分析的默认提问词
 DEFAULT_TACTICAL_QUESTION = (
-    "简短报告画面中的人员、车辆、无人机目标，"
-    "包括数量、大致距离、行为态势和威胁等级。"
-    "回复限50字以内，纯中文。"
+    "用中文一句话描述当前画面中的主要目标和态势。限三十字。"
 )
 
 @register_function("vision_analyze", vision_analyze_desc, ToolType.SYSTEM_CTL)
@@ -94,12 +93,14 @@ def vision_analyze(conn, question=None):
     视觉分析插件：
     从固定路径读取最新截图，调用配置的 VLLM 模块进行分析。
     """
+    total_started_at = time.monotonic()
+    image_age_seconds = None
+
     # 如果用户没有提供具体问题，则使用默认的战术分析
     if not question or question.strip() == "":
         question = DEFAULT_TACTICAL_QUESTION
     else:
-        # 使用战术分析角色包装用户的问题
-        question = f"你是侦察车视觉系统。{question}。数字用中文，简短回复。"
+        question = f"{question}。用中文一句话回答，限三十字。"
     logger.bind(tag=TAG).info(f"Triggered vision_analyze with question: {question}")
     
     # 图片来源优先级：
@@ -108,8 +109,29 @@ def vision_analyze(conn, question=None):
     # 3. /tmp 下最新的图片文件（兜底）
     vllm_cfg = conn.config.get("VLLM", {}).get("rknn_vision", {})
     image_path = vllm_cfg.get("fixed_image_path", os.path.join(tempfile.gettempdir(), "voice_assistant_latest_vision.jpg"))
-    
-    if not os.path.exists(image_path):
+
+    if os.path.exists(image_path):
+        try:
+            max_image_age_seconds = max(
+                0.0,
+                float(vllm_cfg.get("max_image_age_seconds", 5.0)),
+            )
+        except (TypeError, ValueError):
+            max_image_age_seconds = 5.0
+        image_age_seconds = max(0.0, time.time() - os.path.getmtime(image_path))
+        if max_image_age_seconds and image_age_seconds > max_image_age_seconds:
+            logger.bind(tag=TAG).warning(
+                f"视觉画面已过期: path={image_path}, age={image_age_seconds:.1f}s"
+            )
+            return ActionResponse(
+                action=Action.RESPONSE,
+                result="当前视频画面未更新。",
+                response="当前视频画面未更新，请确认视频正在播放。",
+            )
+        logger.bind(tag=TAG).info(
+            f"使用视频最新帧: {image_path}, age={image_age_seconds:.1f}s"
+        )
+    else:
         # 尝试测试图片路径
         test_path = vllm_cfg.get("test_image_path", os.path.join(tempfile.gettempdir(), "test_vision.png"))
         if os.path.exists(test_path):
@@ -132,6 +154,7 @@ def vision_analyze(conn, question=None):
         
     try:
         # [优化] 缓存 VLLM 实例，避免每次调用都重新创建（含 HTTP session 初始化）
+        instance_started_at = time.monotonic()
         select_vllm_module = conn.config["selected_module"].get("VLLM")
         if not select_vllm_module:
             raise ValueError("未配置视觉分析模块")
@@ -146,9 +169,11 @@ def vision_analyze(conn, question=None):
             vllm = create_instance(vllm_type, vllm_config)
             conn._vllm_instance = vllm
             logger.bind(tag=TAG).info(f"VLLM 实例已创建并缓存: type={vllm_type}")
+        instance_elapsed_ms = int((time.monotonic() - instance_started_at) * 1000)
         
         # [优化] 本地 RKNN 模式：直接传路径，跳过 base64 编码→解码→写盘的冗余链路
         # OpenAI 等远程模式仍走 base64 兼容路径
+        model_started_at = time.monotonic()
         if vllm_type in ("rknn", "rknn_vision"):
             result = vllm.response(question, image_path=image_path)
         else:
@@ -157,9 +182,19 @@ def vision_analyze(conn, question=None):
                 image_data = f.read()
             image_base64 = base64.b64encode(image_data).decode("utf-8")
             result = vllm.response(question, image_base64)
+        model_elapsed_ms = int((time.monotonic() - model_started_at) * 1000)
         
         # TTS 兼容处理：清理 Markdown/首尾符号，并将阿拉伯数字转中文。
+        sanitize_started_at = time.monotonic()
         result = _sanitize_result_for_tts(result)
+        sanitize_elapsed_ms = int((time.monotonic() - sanitize_started_at) * 1000)
+        total_elapsed_ms = int((time.monotonic() - total_started_at) * 1000)
+        age_text = "未知" if image_age_seconds is None else f"{image_age_seconds:.1f}s"
+        logger.bind(tag=TAG).info(
+            f"[性能][Vision插件] 总耗时={total_elapsed_ms}毫秒，"
+            f"模型请求={model_elapsed_ms}毫秒，实例准备={instance_elapsed_ms}毫秒，"
+            f"结果清理={sanitize_elapsed_ms}毫秒，图片age={age_text}"
+        )
         
         # 直接返回给 TTS 播报
         return ActionResponse(action=Action.RESPONSE, result=result, response=result)

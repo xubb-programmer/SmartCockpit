@@ -15,6 +15,7 @@ SMOOTH_MAX_WIDTH = 1280
 SMOOTH_MAX_HEIGHT = 720
 SMOOTH_MAX_FPS = 30.0
 FRAGMENT_DURATION_US = 150_000
+MAX_RECONNECT_ATTEMPTS = 5
 
 
 def validate_stream_url(value):
@@ -155,14 +156,20 @@ class VideoSession:
         self.process = None
         self.tasks = []
         self.stopping = False
+        self.url = None
+        self.plan = None
+        self.reconnect_attempt = 0
 
     async def start(self, url):
         await self.stop()
         self.stopping = False
+        self.url = url
+        self.reconnect_attempt = 0
         if not shutil.which("ffmpeg") or not shutil.which("ffprobe"):
             raise ValueError("服务器未安装 ffmpeg/ffprobe，无法播放视频")
         probe = await self._probe(url)
         plan = build_stream_plan(probe)
+        self.plan = plan
         transcode = plan["transcode"]
         print(
             f"[INFO] 视频流开始: {masked_stream_url(url)} "
@@ -171,26 +178,11 @@ class VideoSession:
             f"{plan['output_width']}x{plan['output_height']})",
             flush=True,
         )
-        self.process = await asyncio.create_subprocess_exec(
-            *self._command(url, plan),
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        await self.socket.send_json({
-            "type": "stream-started",
-            "codec": plan["codec"],
-            "sourceCodec": plan["source_codec"],
-            "transcoding": transcode,
-            "width": plan["output_width"],
-            "height": plan["output_height"],
-            "sourceWidth": plan["source_width"],
-            "sourceHeight": plan["source_height"],
-            "fps": plan["output_fps"],
-            "latencyMode": "smooth",
-        })
+        self.process = await self._create_process(url, plan)
+        await self._send_stream_info(plan, "stream-started")
         self.tasks = [
             asyncio.create_task(self._relay()),
-            asyncio.create_task(self._log_stderr()),
+            asyncio.create_task(self._log_stderr(self.process)),
         ]
 
     async def stop(self):
@@ -231,6 +223,11 @@ class VideoSession:
                 process.kill()
             await process.wait()
             raise ValueError("连接视频源超时，请检查地址和网络") from exc
+        except asyncio.CancelledError:
+            with suppress(ProcessLookupError):
+                process.kill()
+            await process.wait()
+            raise
         if process.returncode:
             detail = stderr.decode("utf-8", errors="replace").strip().splitlines()
             raise ValueError(f"无法连接视频源: {(detail[-1] if detail else '未知错误')[:160]}")
@@ -238,6 +235,27 @@ class VideoSession:
         if not streams:
             raise ValueError("视频源中没有可用的视频轨道")
         return streams[0]
+
+    async def _create_process(self, url, plan):
+        return await asyncio.create_subprocess_exec(
+            *self._command(url, plan),
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+
+    async def _send_stream_info(self, plan, message_type):
+        await self.socket.send_json({
+            "type": message_type,
+            "codec": plan["codec"],
+            "sourceCodec": plan["source_codec"],
+            "transcoding": plan["transcode"],
+            "width": plan["output_width"],
+            "height": plan["output_height"],
+            "sourceWidth": plan["source_width"],
+            "sourceHeight": plan["source_height"],
+            "fps": plan["output_fps"],
+            "latencyMode": "smooth",
+        })
 
     def _command(self, url, plan):
         scheme = urlsplit(url).scheme.lower()
@@ -291,25 +309,67 @@ class VideoSession:
 
     async def _relay(self):
         try:
-            while self.process and self.process.stdout:
-                chunk = await self.process.stdout.read(256 * 1024)
+            while not self.stopping and self.process and self.process.stdout:
+                process = self.process
+                chunk = await process.stdout.read(256 * 1024)
                 if not chunk:
+                    code = await process.wait()
+                    if self.stopping or self.socket.closed:
+                        break
+                    if process is not self.process:
+                        continue
+                    if await self._reconnect():
+                        continue
+                    await self.socket.send_json({
+                        "type": "error",
+                        "message": f"视频流已中断（FFmpeg 退出码 {code}）",
+                    })
                     break
                 await self.socket.send_bytes(chunk)
-            process = self.process
-            if process:
-                code = await process.wait()
-                if not self.stopping and not self.socket.closed:
-                    await self.socket.send_json({
-                        "type": "error", "message": f"视频流已中断（FFmpeg 退出码 {code}）"
-                    })
         except (ConnectionResetError, asyncio.CancelledError):
             pass
 
-    async def _log_stderr(self):
+    async def _reconnect(self):
+        """源端短暂断流时重建 FFmpeg，最多重试几次后再报告失败。"""
+        for attempt in range(1, MAX_RECONNECT_ATTEMPTS + 1):
+            if self.stopping or self.socket.closed or not self.url:
+                return False
+            self.reconnect_attempt = attempt
+            delay = min(2.0, 0.25 * (2 ** (attempt - 1)))
+            try:
+                await self.socket.send_json({
+                    "type": "reconnecting",
+                    "attempt": attempt,
+                    "maxAttempts": MAX_RECONNECT_ATTEMPTS,
+                    "delay": delay,
+                })
+                await asyncio.sleep(delay)
+                probe = await self._probe(self.url)
+                plan = build_stream_plan(probe)
+                process = await self._create_process(self.url, plan)
+                self.plan = plan
+                self.process = process
+                self.reconnect_attempt = 0
+                self.tasks.append(asyncio.create_task(self._log_stderr(process)))
+                print(
+                    f"[INFO] 视频流已自动重连: {masked_stream_url(self.url)}",
+                    flush=True,
+                )
+                await self._send_stream_info(plan, "stream-reconnected")
+                return True
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                print(
+                    f"[WARN] 视频流重连失败 ({attempt}/{MAX_RECONNECT_ATTEMPTS}): {exc}",
+                    flush=True,
+                )
+        return False
+
+    async def _log_stderr(self, process):
         try:
-            while self.process and self.process.stderr:
-                line = await self.process.stderr.readline()
+            while process and process.stderr:
+                line = await process.stderr.readline()
                 if not line:
                     break
                 print(f"[WARN] 视频流 FFmpeg: {line.decode(errors='replace').strip()}", flush=True)

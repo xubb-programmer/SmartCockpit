@@ -133,6 +133,147 @@ _ACTION_CN: Dict[str, str] = {
 }
 
 
+_CN_DIGITS = {
+    "零": 0,
+    "一": 1,
+    "二": 2,
+    "两": 2,
+    "三": 3,
+    "四": 4,
+    "五": 5,
+    "六": 6,
+    "七": 7,
+    "八": 8,
+    "九": 9,
+}
+_CN_SMALL_NUMBERS = {
+    0: "零",
+    1: "一",
+    2: "二",
+    3: "三",
+    4: "四",
+    5: "五",
+    6: "六",
+    7: "七",
+    8: "八",
+    9: "九",
+    10: "十",
+}
+
+
+def _int_to_cn(value: int) -> str:
+    if value <= 10:
+        return _CN_SMALL_NUMBERS.get(value, str(value))
+    if value < 20:
+        return "十" + _CN_SMALL_NUMBERS[value - 10]
+    if value < 100:
+        ten, one = divmod(value, 10)
+        return _CN_SMALL_NUMBERS[ten] + "十" + (
+            _CN_SMALL_NUMBERS[one] if one else ""
+        )
+    return str(value)
+
+
+def _parse_number_text(value: object):
+    text = str(value or "").strip()
+    for suffix in ("倍", "圈", "次"):
+        if text.endswith(suffix):
+            text = text[:-len(suffix)]
+    if text.isdigit():
+        return int(text)
+    if text in _CN_DIGITS:
+        return _CN_DIGITS[text]
+    if text == "十":
+        return 10
+    if text.startswith("十") and len(text) == 2 and text[1] in _CN_DIGITS:
+        return 10 + _CN_DIGITS[text[1]]
+    if "十" in text:
+        left, right = text.split("十", 1)
+        if left in _CN_DIGITS and (not right or right in _CN_DIGITS):
+            return _CN_DIGITS[left] * 10 + (_CN_DIGITS[right] if right else 0)
+    return None
+
+
+def _canonical_param_value(value: object, rule: dict) -> str:
+    text = str(value).strip()
+    value_aliases = rule.get("value_aliases") or {}
+    if isinstance(value_aliases, dict):
+        for canonical, aliases in value_aliases.items():
+            alias_values = aliases if isinstance(aliases, list) else [aliases]
+            values = {str(canonical), *(str(item) for item in alias_values)}
+            if text in values:
+                return str(canonical)
+
+    allowed = [str(item) for item in rule.get("allowed", [])]
+    parsed = _parse_number_text(text)
+    if parsed is not None and str(parsed) in allowed:
+        return str(parsed)
+    return text
+
+
+def _validate_and_normalize_params(vc, action, params):
+    actions = action if isinstance(action, list) else [action]
+    unique_actions = list(dict.fromkeys(item for item in actions if isinstance(item, str)))
+    if len(unique_actions) != 1:
+        return False, "多动作参数不明确", None
+
+    action_name = unique_actions[0]
+    all_rules = getattr(vc, "param_rules", {}) or {}
+    action_rules = all_rules.get(action_name, {})
+    required_params = [
+        name for name, rule in action_rules.items()
+        if isinstance(rule, dict) and rule.get("required")
+    ]
+    if params is None or params == {}:
+        if required_params:
+            return False, f"缺少参数{required_params[0]}", None
+        return True, "", None
+    if not isinstance(params, dict):
+        return False, "参数格式无效", None
+
+    if all_rules and action_name not in all_rules:
+        return False, "该动作不支持参数", None
+
+    if not action_rules:
+        return True, "", {
+            str(key): str(value) for key, value in params.items()
+            if value is not None
+        }
+
+    unknown_params = [str(key) for key in params if key not in action_rules]
+    if unknown_params:
+        return False, f"参数不支持: {','.join(unknown_params)}", None
+
+    normalized = {}
+    for name, rule in action_rules.items():
+        if not isinstance(rule, dict):
+            rule = {}
+        if rule.get("required") and name not in params:
+            return False, f"缺少参数{name}", None
+        if name not in params or params[name] is None:
+            continue
+
+        value = _canonical_param_value(params[name], rule)
+        parsed = _parse_number_text(value)
+        if rule.get("integer"):
+            if parsed is None:
+                return False, f"参数{name}必须是整数", None
+            min_value = rule.get("min")
+            max_value = rule.get("max")
+            if min_value is not None and parsed < int(min_value):
+                return False, f"参数{name}过小", None
+            if max_value is not None and parsed > int(max_value):
+                return False, f"参数{name}过大", None
+            value = str(parsed)
+
+        allowed = [str(item) for item in rule.get("allowed", [])]
+        if allowed and value not in allowed:
+            return False, f"参数{name}取值不支持", None
+        normalized[str(name)] = value
+
+    return True, "", normalized or None
+
+
 # ── Profile 懒加载（缓存在 conn 上，避免重复解析 YAML）────────────────────────
 def _get_vc_profile(conn: "ConnectionHandler"):
     """从 conn.config 提取 VehicleControlProfile，结果缓存在 conn._vc_profile。"""
@@ -140,6 +281,39 @@ def _get_vc_profile(conn: "ConnectionHandler"):
         from plugins_func.functions.vehicle_profile_schema import VehicleControlProfile
         conn._vc_profile = VehicleControlProfile.from_profile(conn.config)
     return conn._vc_profile
+
+
+def _validate_model_request(vc, target, action) -> Tuple[bool, str]:
+    """Validate only the model protocol and vehicle capability boundaries."""
+    actions = action if isinstance(action, list) else [action]
+    if not actions or any(not isinstance(item, str) or not item for item in actions):
+        return False, "动作参数无效"
+
+    targets = target if isinstance(target, list) else [target]
+    if not targets or any(not isinstance(item, str) or not item for item in targets):
+        return False, "设备参数无效"
+
+    target_ids = [item for item in targets if item.lower() != "all"]
+    is_all = len(target_ids) != len(targets) or set(target_ids) == set(vc.devices.keys())
+    if is_all:
+        unique_actions = set(actions)
+        if len(unique_actions) != 1:
+            return False, "所有设备指令只能执行一个统一动作"
+        all_action = next(iter(unique_actions))
+        if not vc.targets_for_all(all_action):
+            return False, f"所有设备均不支持动作{all_action}"
+        return True, ""
+
+    if any(not vc.is_valid_device(item) for item in target_ids):
+        return False, "设备参数无效"
+
+    expanded_actions = actions if len(actions) > 1 else actions * len(target_ids)
+    if len(expanded_actions) != len(target_ids):
+        return False, "设备与动作数量不匹配"
+    for item_target, item_action in zip(target_ids, expanded_actions):
+        if not vc.is_valid_action(item_target, item_action):
+            return False, f"设备{item_target}不支持动作{item_action}"
+    return True, ""
 
 
 # ── HTTP 指令下发（闭环版）────────────────────────────────────────────────────
@@ -253,6 +427,13 @@ _ALREADY_CN: Dict[str, str] = {
     "recon_start":  "侦察",
 }
 
+_TRACKER_ACTION_CN: Dict[str, tuple] = {
+    "detect_on":  ("目标检测", "开启"),
+    "detect_off": ("目标检测", "关闭"),
+    "track_on":   ("目标跟踪", "开启"),
+    "track_off":  ("目标跟踪", "关闭"),
+}
+
 
 # ── 语音回复生成（差异化）─────────────────────────────────────────────────────
 def _build_response(vc, target: str, action: str, message: str = "") -> str:
@@ -260,6 +441,13 @@ def _build_response(vc, target: str, action: str, message: str = "") -> str:
     生成≤15字的简洁中文回复。
     根据设备端返回的 message 区分：正常执行 / 已是目标状态 / 失败。
     """
+    tracker_action = _TRACKER_ACTION_CN.get(action) if target == "tracker" else None
+    if tracker_action:
+        subject, state = tracker_action
+        if message.startswith("already_"):
+            return f"{subject}已处于{state}状态"
+        return f"{subject}已{state}"
+
     dev_cn = vc.device_cn_name(target)
     act_cn = _ACTION_CN.get(action, "操作中")
 
@@ -311,9 +499,16 @@ def _execute_single(
     # HTTP 下发（闭环：解析设备端响应）
     success, state, message = _send_command(conn, cmd)
     if not success:
-        dev_cn = vc.device_cn_name(target)
-        act_cn = _ACTION_CN.get(action, "操作")
-        fail_response = f"{dev_cn}{act_cn.replace('已', '')}失败"
+        tracker_action = (
+            _TRACKER_ACTION_CN.get(action) if target == "tracker" else None
+        )
+        if tracker_action:
+            subject, target_state = tracker_action
+            fail_response = f"{subject}{target_state}失败"
+        else:
+            dev_cn = vc.device_cn_name(target)
+            act_cn = _ACTION_CN.get(action, "操作")
+            fail_response = f"{dev_cn}{act_cn.replace('已', '')}失败"
         return ActionResponse(
             action=Action.RESPONSE,
             result=json.dumps({"error": message or "指令执行失败"}, ensure_ascii=False),
@@ -345,21 +540,37 @@ def vehicle_control(
 ) -> ActionResponse:
     vc = _get_vc_profile(conn)
 
-    # action 缺失时，LLM 可能误将状态查询路由到此函数，自动转给 vehicle_status
-    if not action:
-        logger.bind(tag=TAG).info(
-            f"[vehicle_control] action 缺失，自动转 vehicle_status (target={target})"
+    request_ok, request_reason = _validate_model_request(vc, target, action)
+    if not request_ok:
+        logger.bind(tag=TAG).warning(
+            f"[协议校验] 拒绝设备控制: target={target!r}, "
+            f"action={action!r}, reason={request_reason}"
         )
-        try:
-            from plugins_func.functions.vehicle_status import vehicle_status
-            return vehicle_status(conn, target=target)
-        except Exception as e:
-            logger.bind(tag=TAG).warning(f"[vehicle_control] 转 vehicle_status 失败: {e}")
-            return ActionResponse(
-                action=Action.RESPONSE,
-                result=json.dumps({"error": "缺少 action 参数"}, ensure_ascii=False),
-                response="请告诉我需要执行什么操作",
-            )
+        return ActionResponse(
+            action=Action.RESPONSE,
+            result=json.dumps(
+                {"error": "control_request_invalid", "reason": request_reason},
+                ensure_ascii=False,
+            ),
+            response="当前车型不支持该控制",
+        )
+
+    params_ok, params_reason, params = _validate_and_normalize_params(
+        vc, action, params
+    )
+    if not params_ok:
+        logger.bind(tag=TAG).warning(
+            f"[协议校验] 拒绝设备控制参数: target={target!r}, "
+            f"action={action!r}, params={params!r}, reason={params_reason}"
+        )
+        return ActionResponse(
+            action=Action.RESPONSE,
+            result=json.dumps(
+                {"error": "control_params_invalid", "reason": params_reason},
+                ensure_ascii=False,
+            ),
+            response="控制参数不明确，请重新说",
+        )
 
     # 兼容旧提示词和模型输出：all 统一进入批量展开逻辑。
     if isinstance(target, str) and target.lower() == "all":

@@ -131,7 +131,7 @@ body.video-mode .chat-container {
     position: absolute;
     top: 12px;
     left: 12px;
-    right: 12px;
+    right: 64px;
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -162,6 +162,58 @@ body.video-mode .chat-container {
 .video-status-dot.playing { background: #35c46a; }
 .video-status-dot.error { background: #ef5350; }
 .control-btn.video-active { background: rgba(39, 125, 161, 0.92); }
+
+.video-fullscreen-btn {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    z-index: 3;
+    display: grid;
+    place-items: center;
+    width: 40px;
+    height: 40px;
+    padding: 0;
+    border: 1px solid rgba(255, 255, 255, 0.28);
+    border-radius: 6px;
+    color: #fff;
+    background: rgba(12, 15, 20, 0.78);
+    cursor: pointer;
+    transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.video-fullscreen-btn:hover {
+    border-color: rgba(255, 255, 255, 0.52);
+    background: rgba(39, 125, 161, 0.94);
+}
+
+.video-fullscreen-btn:focus-visible {
+    outline: 2px solid #fff;
+    outline-offset: 2px;
+}
+
+.video-fullscreen-btn:disabled {
+    color: rgba(255, 255, 255, 0.42);
+    background: rgba(12, 15, 20, 0.48);
+    cursor: not-allowed;
+}
+
+.video-fullscreen-btn svg {
+    width: 24px;
+    height: 24px;
+}
+
+.video-fullscreen-btn .btn-text,
+.video-fullscreen-exit {
+    display: none;
+}
+
+.video-fullscreen-btn.is-fullscreen .video-fullscreen-enter {
+    display: none;
+}
+
+.video-fullscreen-btn.is-fullscreen .video-fullscreen-exit {
+    display: block;
+}
 
 .password-input-wrap {
     display: grid;

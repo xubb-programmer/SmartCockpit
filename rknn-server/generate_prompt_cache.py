@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 """
 一次性离线生成 Prompt Cache 文件。
-在 RK3588 板子上运行一次即可，后续 flask_server.py 启动时自动加载。
+
+注意：RKLLM 1.3 的 Qwen3.5 模型不支持保存 prompt cache。
+Qwen3.5 默认只生成 voice_assistant_static_prompt.txt，并在服务启动时预热。
+该工具主要用于仍支持 prompt cache 的旧文本模型。
 
 用法:
   python3 generate_prompt_cache.py \
       --rkllm_model_path ../models/qwen3-4b-instruct_w8a8.rkllm \
       --target_platform rk3588 \
-      --output ../models/voice_assistant_system_prompt.cache \
+      --output ../models/voice_assistant_system_prompt_qwen3-4b-instruct.cache \
       --prompt_file ../models/voice_assistant_static_prompt.txt
 """
 
@@ -21,7 +24,8 @@ from rkllm_types import (
     RKLLMParam, RKLLMInput, RKLLMResult, RKLLMInferParam,
     RKLLMPromptCacheParam, RKLLMInputUnion,
     RKLLMInferMode, RKLLMInputType, LLMCallState,
-    RKLLM_Handle_t, RKLLM_Callback_t,
+    RKLLM_Handle_t, RKLLMCallback, RKLLM_Callback_t,
+    make_rkllm_callback,
 )
 
 # ---------- 回调 ----------
@@ -40,6 +44,7 @@ def main():
     parser.add_argument("--prompt", type=str, default=None, help="Static system prompt text")
     parser.add_argument("--prompt_file", type=str, default=None, help="File containing static system prompt")
     parser.add_argument("--max_context_len", type=int, default=4096, help="Max context length (must <= model's max_context_limit)")
+    parser.add_argument("--multimodal", action="store_true", help="Match multimodal RKLLM runtime parameters (base_domain_id=1 on rk3588/rk3576)")
     args = parser.parse_args()
 
     # 获取静态提示词
@@ -76,13 +81,14 @@ def main():
     rkllm_param.mirostat = 0
     rkllm_param.mirostat_tau = 5.0
     rkllm_param.mirostat_eta = 0.1
+    rkllm_param.ignore_eos_token = False
     rkllm_param.is_async = False
 
-    rkllm_param.img_start = "".encode('utf-8')
-    rkllm_param.img_end = "".encode('utf-8')
-    rkllm_param.img_content = "".encode('utf-8')
-
-    rkllm_param.extend_param.base_domain_id = 0
+    if args.multimodal and args.target_platform.lower() in ["rk3576", "rk3588"]:
+        rkllm_param.extend_param.base_domain_id = 1
+        print("Using multimodal base_domain_id=1 for prompt cache.")
+    else:
+        rkllm_param.extend_param.base_domain_id = 0
     rkllm_param.extend_param.embed_flash = 1
     rkllm_param.extend_param.n_batch = 1
     rkllm_param.extend_param.use_cross_attn = 0
@@ -95,12 +101,13 @@ def main():
 
     # 初始化模型
     handle = RKLLM_Handle_t()
+    rkllm_callback = make_rkllm_callback(callback)
     rkllm_init = rkllm_lib.rkllm_init
-    rkllm_init.argtypes = [ctypes.POINTER(RKLLM_Handle_t), ctypes.POINTER(RKLLMParam), RKLLM_Callback_t]
+    rkllm_init.argtypes = [ctypes.POINTER(RKLLM_Handle_t), ctypes.POINTER(RKLLMParam), ctypes.POINTER(RKLLMCallback)]
     rkllm_init.restype = ctypes.c_int
 
     print("Loading model...")
-    ret = rkllm_init(ctypes.byref(handle), ctypes.byref(rkllm_param), callback)
+    ret = rkllm_init(ctypes.byref(handle), ctypes.byref(rkllm_param), ctypes.byref(rkllm_callback))
     if ret != 0:
         print(f"rkllm_init failed: {ret}")
         sys.exit(1)

@@ -50,34 +50,13 @@ TAG = __name__
 # 工具调用规则 - 用于动态注入提醒
 TOOL_CALLING_RULES = """
 <tool_calling>
-【核心原则】你是拥有工具能力的智能助手。当用户请求需要实时信息或执行操作时，调用相应工具获取数据，禁止凭空编造答案。
-
-- **何时必须调用工具：**
-  1. 实时信息查询（新闻、非本地天气、股价、汇率等）
-  2. 执行操作（播放音乐、控制设备、拍照、设置闹钟等）
-  3. 知识库检索（当工具列表包含 search_from_ragflow 时，结合用户意图判断是否需要调用）
-  4. 查询非今天的农历信息（明天农历、某日宜忌、节气等）
-  5. 用户说"拍照"时调用 self_camera_take_photo，默认 question 参数为"描述一下看到的物品"
-
-- **何时无需调用工具：**
-  1. `<context>` 中已提供的信息（当前时间、今天日期、今天农历、本地天气等）
-  2. 普通对话、问候、闲聊、情感交流、讲故事
-  3. 通用知识问答（非实时信息）
-
-- **调用规范：**
-  1. 每次请求独立判断，不复用历史工具结果，需重新获取最新数据
-  2. 多任务时依次调用所有需要的工具，并依次总结每个工具的结果，不得遗漏
-  3. 严格遵循工具的参数要求，提供所有必要参数
-  4. 不确定时引导用户澄清或告知能力限制，切勿猜测或编造
-  5. 不调用未提供的工具，对话中提及的旧工具若不可用则忽略或说明
-
-- **反偷懒机制（最高优先级）：**
-  1. **每次独立判断：** 无论对话历史中是否调用过工具，当前请求必须根据当前需求独立判断是否需要调用
-  2. **禁止模式模仿：** 即使之前的回复没有调用工具，也不代表本次可以不调用
-  3. **自我检查：** 回复前必须自问："这个请求是否涉及实时信息或执行操作？如果是，我调用工具了吗？"
-  4. **历史不等于现在：** 对话历史中的行为模式不影响当前判断，每个用户请求都是全新的开始
+需要工具时只输出短协议，不附加解释：
+控制 @C|target|action，状态 @S|target，视觉 @V|问题，音乐 @M|歌名，
+日期时间 @D|all，告别 @X。多动作按用户顺序输出多行。
+普通对话和功能咨询直接回答，不调用工具；缺少必要目标时先询问。
 </tool_calling>
 """
+
 
 auto_import_modules("plugins_func.functions")
 
@@ -105,6 +84,8 @@ class ConnectionHandler:
 
         self.need_bind = False  # 是否需要绑定设备
         self.bind_completed_event = asyncio.Event()
+        self.components_ready_event = asyncio.Event()
+        self.components_init_error = None
         self.bind_code = None  # 绑定设备的验证码
         self.last_bind_prompt_time = 0  # 上次播放绑定提示的时间戳(秒)
         self.bind_prompt_interval = 60  # 绑定提示播放间隔(秒)
@@ -126,12 +107,16 @@ class ConnectionHandler:
         self.client_abort = False
         self.client_is_speaking = False
         self.client_listen_mode = "auto"
+        self.ignore_audio_until = 0.0
+        self.suppressed_audio_packets = 0
 
         # 线程任务相关
         self.loop = None  # 在 handle_connection 中获取运行中的事件循环
         self.stop_event = threading.Event()
         self.executor = ThreadPoolExecutor(max_workers=5)
         self._chat_lock = threading.Lock()  # 序列化 chat() 调用，防止并发竞态
+        self._abort_lock = asyncio.Lock()  # 串行化相邻 listen/打断事件
+        self._close_started = False
 
         # 添加上报线程池
         self.report_queue = queue.Queue()
@@ -164,6 +149,10 @@ class ConnectionHandler:
         self.vad_last_voice_time = 0.0  # 记录用户最后一次说话的时间（毫秒）
         self.client_voice_stop = False
         self.last_is_voice = False
+        self.current_speech_started_at = None
+        self.current_speech_ended_at = None
+        self.current_vad_completed_at = None
+        self.last_asr_completed_at = None
         self.audio_rx_packets = 0
         self.audio_rx_bytes = 0
 
@@ -176,6 +165,8 @@ class ConnectionHandler:
 
         # llm相关变量
         self.dialogue = Dialogue()
+        self.current_user_query = None
+        self.current_turn_started_at = None
 
         # 工具调用统计（用于监控和自动恢复）
         self.tool_call_stats = {
@@ -200,7 +191,7 @@ class ConnectionHandler:
         self.intent_type = "nointent"
 
         self.timeout_seconds = (
-                int(self.config.get("close_connection_no_voice_time", 120)) + 60
+                int(self.config.get("close_connection_no_voice_time", 300)) + 60
         )  # 在原来第一道关闭的基础上加60秒，进行二道关闭
         self.timeout_task = None
 
@@ -539,12 +530,13 @@ class ConnectionHandler:
             if self.tts is None:
                 self.tts = self._initialize_tts()
             # 打开语音合成通道
-            asyncio.run_coroutine_threadsafe(
+            tts_open_future = asyncio.run_coroutine_threadsafe(
                 self.tts.open_audio_channels(self), self.loop
             )
+            tts_open_future.result(timeout=15)
             if self.need_bind:
                 self.bind_completed_event.set()
-                return
+                return True
             self.selected_module_str = build_module_string(
                 self.config.get("selected_module", {})
             )
@@ -569,9 +561,10 @@ class ConnectionHandler:
             # 初始化声纹识别
             self._initialize_voiceprint()
             # 打开语音识别通道
-            asyncio.run_coroutine_threadsafe(
+            asr_open_future = asyncio.run_coroutine_threadsafe(
                 self.asr.open_audio_channels(self), self.loop
             )
+            asr_open_future.result(timeout=15)
 
             """加载记忆"""
             self._initialize_memory()
@@ -581,9 +574,12 @@ class ConnectionHandler:
             self._init_report_threads()
             """更新系统提示词"""
             self._init_prompt_enhancement()
+            return True
 
         except Exception as e:
+            self.components_init_error = str(e)
             self.logger.bind(tag=TAG).error(f"实例化组件失败: {e}")
+            return False
 
     def _init_prompt_enhancement(self):
 
@@ -641,7 +637,7 @@ class ConnectionHandler:
         """为当前连接初始化声纹识别"""
         try:
             voiceprint_config = self.config.get("voiceprint", {})
-            if voiceprint_config:
+            if voiceprint_config and voiceprint_config.get("url"):
                 voiceprint_provider = VoiceprintProvider(voiceprint_config)
                 if voiceprint_provider is not None and voiceprint_provider.enabled:
                     self.voiceprint_provider = voiceprint_provider
@@ -659,9 +655,40 @@ class ConnectionHandler:
             # 异步获取差异化配置
             await self._initialize_private_config_async()
             # 在线程池中初始化组件
-            self.executor.submit(self._initialize_components)
+            initialized = await self.loop.run_in_executor(
+                self.executor,
+                self._initialize_components,
+            )
+            if initialized:
+                self.logger.bind(tag=TAG).info("连接组件初始化完成")
+            else:
+                self.logger.bind(tag=TAG).error(
+                    f"连接组件初始化失败: {self.components_init_error or '未知错误'}"
+                )
         except Exception as e:
+            self.components_init_error = str(e)
             self.logger.bind(tag=TAG).error(f"后台初始化失败: {e}")
+        finally:
+            self.components_ready_event.set()
+
+    async def wait_until_components_ready(self, timeout=15):
+        """等待连接私有组件完成初始化，避免首条消息与初始化线程竞态。"""
+        if not self.components_ready_event.is_set():
+            self.logger.bind(tag=TAG).info("连接组件尚未就绪，等待初始化完成")
+            try:
+                await asyncio.wait_for(
+                    self.components_ready_event.wait(),
+                    timeout=timeout,
+                )
+            except asyncio.TimeoutError:
+                self.logger.bind(tag=TAG).warning(
+                    f"等待连接组件初始化超时（{timeout}秒）"
+                )
+                return False
+
+        if self.components_init_error:
+            return False
+        return self.tts is not None and self.asr is not None
 
     async def _initialize_private_config_async(self):
         """从接口异步获取差异化配置（异步版本，不阻塞主循环）"""
@@ -911,10 +938,13 @@ class ConnectionHandler:
     def _chat_inner(self, query, depth=0):
         # 保存当前任务的sentence_id到局部变量，避免被新任务覆盖
         current_sentence_id = None
-        _t_chat_start = time.time()  # ← 计时：chat()入口
+        _t_chat_start = time.monotonic()
 
         if query is not None:
             self.logger.bind(tag=TAG).info(f"大模型收到用户消息: {query}")
+            if depth == 0:
+                self.current_user_query = query
+                self.current_turn_started_at = _t_chat_start
 
         # 为最顶层时新建会话ID和发送FIRST请求
         if depth == 0:
@@ -954,7 +984,7 @@ class ConnectionHandler:
         kv_reset = False  # trim_history 触发时设为 True，通知 RKLLM 服务端重置对话 KV
 
         if depth == 0 and query is not None:
-            _t0 = time.time()
+            _t0 = time.monotonic()
             dialogue_length = len(self.dialogue.dialogue)
             current_turn = dialogue_length // 2
 
@@ -978,10 +1008,10 @@ class ConnectionHandler:
                         f"对话历史过长({dialogue_length}条)，已截断保留最近{max_dialogue_turns}轮，移除{removed}条"
                     )
             self.logger.bind(tag=TAG).debug(
-                f"[TIMING] 入口→trim_history: {(time.time()-_t_chat_start)*1000:.0f}ms")
+                f"[TIMING] 入口→trim_history: {(time.monotonic()-_t_chat_start)*1000:.0f}ms")
 
         # Define intent functions
-        _t1 = time.time()
+        _t1 = time.monotonic()
         functions = None
         # 达到最大深度时，禁用工具调用，强制 LLM 直接回答
         if (
@@ -991,10 +1021,10 @@ class ConnectionHandler:
         ):
             functions = self.func_handler.get_functions()
         self.logger.bind(tag=TAG).debug(
-            f"[TIMING] trim→get_functions: {(time.time()-_t1)*1000:.0f}ms")
+            f"[TIMING] trim→get_functions: {(time.monotonic()-_t1)*1000:.0f}ms")
 
         # 长对话工具调用规则强化：动态生成基于当前可用工具的提醒
-        _t2 = time.time()
+        _t2 = time.monotonic()
         tool_call_reminder = None
         if depth == 0 and query is not None and functions is not None:
             dialogue_length = len(self.dialogue.dialogue)
@@ -1025,7 +1055,7 @@ class ConnectionHandler:
                         f"对话历史较长({dialogue_length}条)，已注入{reminder_level}等级工具调用规则强化，当前可用工具：{tool_summary}"
                     )
         self.logger.bind(tag=TAG).debug(
-            f"[TIMING] get_functions→tool_reminder: {(time.time()-_t2)*1000:.0f}ms")
+            f"[TIMING] get_functions→tool_reminder: {(time.monotonic()-_t2)*1000:.0f}ms")
 
         response_message = []
 
@@ -1035,7 +1065,7 @@ class ConnectionHandler:
 
         try:
             # 使用带记忆的对话
-            _t3 = time.time()
+            _t3 = time.monotonic()
             memory_str = None
             # 仅当query非空（代表用户询问）时查询记忆
             if self.memory is not None and query:
@@ -1044,9 +1074,9 @@ class ConnectionHandler:
                 )
                 memory_str = future.result()
             self.logger.bind(tag=TAG).debug(
-                f"[TIMING] memory.query_memory: {(time.time()-_t3)*1000:.0f}ms")
+                f"[TIMING] memory.query_memory: {(time.monotonic()-_t3)*1000:.0f}ms")
 
-            _t4 = time.time()
+            _t4 = time.monotonic()
             if self.intent_type == "function_call" and functions is not None:
                 # 使用支持functions的streaming接口
                 llm_responses = self.llm.response_with_functions(
@@ -1066,8 +1096,8 @@ class ConnectionHandler:
                     reset_kv=kv_reset,
                 )
             self.logger.bind(tag=TAG).debug(
-                f"[TIMING] 调用前总计: {(time.time()-_t_chat_start)*1000:.0f}ms "
-                f"| get_llm_dialogue+POST: {(time.time()-_t4)*1000:.0f}ms")
+                f"[TIMING] 调用前总计: {(time.monotonic()-_t_chat_start)*1000:.0f}ms "
+                f"| get_llm_dialogue+POST: {(time.monotonic()-_t4)*1000:.0f}ms")
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"LLM 处理出错 {query}: {e}")
             return None
@@ -1078,10 +1108,18 @@ class ConnectionHandler:
         tool_calls_list = []  # 格式: [{"id": "", "name": "", "arguments": ""}]
         content_arguments = ""
         emotion_flag = True
+        llm_first_result_at = None
+        llm_output_chars = 0
         try:
             for response in llm_responses:
                 if self.client_abort:
                     break
+                if llm_first_result_at is None:
+                    llm_first_result_at = time.monotonic()
+                    self.logger.bind(tag=TAG).info(
+                        f"[性能][LLM] 首个有效结果="
+                        f"{(llm_first_result_at - _t_chat_start) * 1000:.0f}毫秒"
+                    )
                 if self.intent_type == "function_call" and functions is not None:
                     content, tools_call = response
                     if "content" in response:
@@ -1089,6 +1127,7 @@ class ConnectionHandler:
                         tools_call = None
                     if content is not None and len(content) > 0:
                         content_arguments += content
+                        llm_output_chars += len(content)
 
                     if not tool_call_flag and "<tool_call>" in content_arguments:
                         # print("content_arguments", content_arguments)
@@ -1099,6 +1138,8 @@ class ConnectionHandler:
                         self._merge_tool_calls(tool_calls_list, tools_call)
                 else:
                     content = response
+                    if content is not None:
+                        llm_output_chars += len(content)
 
                 # 在llm回复中获取情绪表情，一轮对话只在开头获取一次
                 # 车载场景无显示屏，可通过 disable_emotion: true 关闭
@@ -1144,6 +1185,16 @@ class ConnectionHandler:
                     )
                 )
             return
+        finally:
+            llm_total_ms = (time.monotonic() - _t_chat_start) * 1000
+            first_ms = (
+                (llm_first_result_at - _t_chat_start) * 1000
+                if llm_first_result_at is not None else -1
+            )
+            self.logger.bind(tag=TAG).info(
+                f"[性能][LLM] 首结果={first_ms:.0f}毫秒，总耗时={llm_total_ms:.0f}毫秒，"
+                f"输出字符={llm_output_chars}，工具调用={tool_call_flag}"
+            )
         # 处理function call
         if tool_call_flag:
             bHasError = False
@@ -1419,10 +1470,17 @@ class ConnectionHandler:
 
     def clearSpeakStatus(self):
         self.client_is_speaking = False
-        self.logger.bind(tag=TAG).debug(f"清除服务端讲话状态")
+        tail_ms = max(0, int(self.config.get("echo_suppression_tail_ms", 800)))
+        self.ignore_audio_until = time.monotonic() + tail_ms / 1000.0
+        self.logger.bind(tag=TAG).debug(
+            f"清除服务端讲话状态，继续抑制回声{tail_ms}毫秒"
+        )
 
     async def close(self, ws=None):
         """资源清理方法"""
+        if self._close_started:
+            return
+        self._close_started = True
         try:
             # 清理 VAD 连接资源
             if (

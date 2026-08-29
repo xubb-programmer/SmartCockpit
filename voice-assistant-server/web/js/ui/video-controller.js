@@ -1,4 +1,8 @@
-import { videoStreamPlayer } from '../core/video/player.js?v=0819a';
+import { videoStreamPlayer } from '../core/video/player.js?v=0828a';
+
+const VISION_FRAME_UPLOAD_INTERVAL_MS = 1000;
+const VISION_FRAME_MAX_EDGE = 896;
+const VISION_FRAME_JPEG_QUALITY = 0.84;
 
 class VideoUIController {
     init() {
@@ -11,6 +15,19 @@ class VideoUIController {
         this.deleteHistoryButton = document.getElementById('deleteVideoHistoryBtn');
         this.autoPlay = document.getElementById('videoAutoPlay');
         this.autoReconnect = document.getElementById('videoAutoReconnect');
+        this.frameCanvas = document.createElement('canvas');
+        this.frameContext = this.frameCanvas.getContext('2d', {
+            alpha: false,
+            desynchronized: true,
+        });
+        this.frameUploadTimer = null;
+        this.frameUploadInFlight = false;
+        this.lastCapturedVideoTime = null;
+        this.frameUploadStats = {
+            uploaded: 0,
+            lastUploadAt: 0,
+            lastError: '',
+        };
         this.player.attach(this.video);
         this.url.value = this.player.config.url;
         this.autoPlay.checked = this.player.config.autoPlay;
@@ -20,7 +37,10 @@ class VideoUIController {
         this.bindEvents();
         this.player.onStatusChange = (status, message) => this.updateStatus(status, message);
         this.player.onStreamInfo = (info) => this.updateStreamInfo(info);
-        window.getVideoDiagnostics = () => this.player.getDiagnostics();
+        window.getVideoDiagnostics = () => ({
+            ...this.player.getDiagnostics(),
+            visionFrame: { ...this.frameUploadStats },
+        });
         if (this.player.config.autoPlay && this.player.config.url) {
             this.showStage();
             setTimeout(() => this.play(), 300);
@@ -63,7 +83,10 @@ class VideoUIController {
         this.fullscreenButton.addEventListener('click', () => this.toggleFullscreen());
         this.video.addEventListener('dblclick', () => this.toggleFullscreen());
         document.addEventListener('fullscreenchange', () => this.updateFullscreenButton());
-        window.addEventListener('beforeunload', () => this.player.stop());
+        window.addEventListener('beforeunload', () => {
+            this.stopFrameUploads();
+            this.player.stop();
+        });
     }
 
     save() {
@@ -107,7 +130,12 @@ class VideoUIController {
         const fullscreen = document.fullscreenElement === this.stage;
         this.fullscreenButton.querySelector('.btn-text').textContent =
             fullscreen ? '默认' : '全屏';
+        this.fullscreenButton.classList.toggle('is-fullscreen', fullscreen);
         this.fullscreenButton.title = fullscreen ? '恢复默认尺寸' : '全屏显示视频';
+        this.fullscreenButton.setAttribute(
+            'aria-label',
+            fullscreen ? '恢复默认尺寸' : '全屏显示视频'
+        );
     }
 
     maskUrl(url) {
@@ -172,6 +200,89 @@ class VideoUIController {
         document.getElementById('videoStateTitle').textContent = names[status] || names.idle;
         document.getElementById('videoStateMessage').textContent = message;
         document.getElementById('videoFullscreenBtn').disabled = status !== 'playing';
+        if (status === 'playing') {
+            this.startFrameUploads();
+        } else {
+            this.stopFrameUploads();
+        }
+    }
+
+    startFrameUploads() {
+        if (this.frameUploadTimer) return;
+        void this.captureAndUploadFrame();
+        this.frameUploadTimer = window.setInterval(
+            () => void this.captureAndUploadFrame(),
+            VISION_FRAME_UPLOAD_INTERVAL_MS,
+        );
+    }
+
+    stopFrameUploads() {
+        if (this.frameUploadTimer) {
+            window.clearInterval(this.frameUploadTimer);
+            this.frameUploadTimer = null;
+        }
+        this.lastCapturedVideoTime = null;
+    }
+
+    async captureAndUploadFrame() {
+        if (this.frameUploadInFlight || !this.frameContext) return;
+        const haveCurrentData = this.video?.HAVE_CURRENT_DATA || 2;
+        if (!this.video || this.video.readyState < haveCurrentData) return;
+
+        const sourceWidth = this.video.videoWidth;
+        const sourceHeight = this.video.videoHeight;
+        const videoTime = this.video.currentTime;
+        if (!sourceWidth || !sourceHeight || !Number.isFinite(videoTime)) return;
+        if (this.lastCapturedVideoTime !== null &&
+            Math.abs(videoTime - this.lastCapturedVideoTime) < 0.001) return;
+
+        const scale = Math.min(
+            1,
+            VISION_FRAME_MAX_EDGE / Math.max(sourceWidth, sourceHeight),
+        );
+        const frameWidth = Math.max(1, Math.round(sourceWidth * scale));
+        const frameHeight = Math.max(1, Math.round(sourceHeight * scale));
+        if (this.frameCanvas.width !== frameWidth) this.frameCanvas.width = frameWidth;
+        if (this.frameCanvas.height !== frameHeight) this.frameCanvas.height = frameHeight;
+
+        this.frameUploadInFlight = true;
+        try {
+            this.frameContext.drawImage(this.video, 0, 0, frameWidth, frameHeight);
+            const frameBlob = await new Promise((resolve) => {
+                this.frameCanvas.toBlob(
+                    resolve,
+                    'image/jpeg',
+                    VISION_FRAME_JPEG_QUALITY,
+                );
+            });
+            if (!frameBlob) throw new Error('浏览器无法生成视频截图');
+
+            const response = await fetch('/video/frame', {
+                method: 'POST',
+                headers: { 'Content-Type': 'image/jpeg' },
+                body: frameBlob,
+                cache: 'no-store',
+                credentials: 'same-origin',
+            });
+            if (!response.ok) {
+                const details = await response.text();
+                throw new Error(`上传失败 ${response.status}: ${details}`);
+            }
+
+            this.lastCapturedVideoTime = videoTime;
+            this.frameUploadStats.uploaded += 1;
+            this.frameUploadStats.lastUploadAt = Date.now();
+            this.frameUploadStats.lastError = '';
+        } catch (error) {
+            this.frameUploadStats.lastError = error.message;
+            const now = Date.now();
+            if (!this.lastFrameUploadWarningAt || now - this.lastFrameUploadWarningAt > 30000) {
+                console.warn(`[视频截图] ${error.message}`);
+                this.lastFrameUploadWarningAt = now;
+            }
+        } finally {
+            this.frameUploadInFlight = false;
+        }
     }
 
     updateStreamInfo(info) {

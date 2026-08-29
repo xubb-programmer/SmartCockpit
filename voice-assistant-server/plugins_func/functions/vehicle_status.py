@@ -10,8 +10,9 @@ vehicle_status 车辆设备状态查询插件。
 from __future__ import annotations
 
 import json
+import re
 import requests
-from typing import Dict, TYPE_CHECKING
+from typing import Dict, List, Optional, Tuple, TYPE_CHECKING
 
 from config.logger import setup_logging
 from plugins_func.register import register_function, ToolType, Action, ActionResponse
@@ -60,9 +61,11 @@ _STATE_VALUE_CN: Dict[str, str] = {
 # ── 状态键中文映射 ────────────────────────────────────────────────────────────
 _STATE_KEY_CN: Dict[str, str] = {
     "power": "电源",
+    "cover": "顶盖",
     "cross": "十字丝",
     "enhance": "增强",
     "fog": "透雾",
+    "night": "夜视",
     "detect": "识别",
     "track": "跟踪",
     "recon": "侦察",
@@ -197,14 +200,68 @@ _EXT_STATE_KEY_CN: Dict[str, str] = {
     "level": "调平",
 }
 
+_SAFE_NUMBER_RE = re.compile(r"^-?\d+(?:\.\d+)?$")
+_CHINESE_RE = re.compile(r"[\u4e00-\u9fff]")
+
+
+def _resolve_status_scope(
+    conn: "ConnectionHandler",
+    vc,
+    target: object,
+) -> Tuple[Optional[str], Optional[List[str]]]:
+    """Resolve only canonical targets emitted by the model protocol."""
+    if target is None or target == "":
+        return None, None
+
+    if isinstance(target, str) and target.lower() in ("all", "*"):
+        return None, None
+
+    if isinstance(target, (list, tuple)):
+        targets = list(target)
+        if targets and all(
+            isinstance(item, str) and vc.is_valid_device(item)
+            for item in targets
+        ):
+            if len(targets) == 1:
+                return targets[0], targets
+            return None, list(dict.fromkeys(targets))
+        return str(target), None
+
+    if isinstance(target, str) and vc.is_valid_device(target):
+        return target, [target]
+    return str(target), None
+
+
+def _safe_state_value(value: object) -> str:
+    value_text = "" if value is None else str(value).strip()
+    mapped = _EXT_STATE_VALUE_CN.get(
+        value_text,
+        _STATE_VALUE_CN.get(value_text),
+    )
+    if mapped is not None:
+        return mapped
+    if isinstance(value, bool):
+        return "是" if value else "否"
+    if _SAFE_NUMBER_RE.fullmatch(value_text) or _CHINESE_RE.search(value_text):
+        return value_text
+    return "未知"
+
 def _should_skip_status_value(key: str, value: object, status: dict) -> bool:
     return False
 
 
-def _format_status_part(key: str, value: object) -> str:
+def _format_status_part(key: str, value: object) -> Optional[str]:
     value_text = "" if value is None else str(value)
-    value_cn = _EXT_STATE_VALUE_CN.get(value_text, _STATE_VALUE_CN.get(value_text, value_text))
-    key_cn = _EXT_STATE_KEY_CN.get(key, _STATE_KEY_CN.get(key, key))
+    value_cn = _safe_state_value(value)
+    key_cn = _EXT_STATE_KEY_CN.get(key, _STATE_KEY_CN.get(key))
+    if key_cn is None:
+        if _CHINESE_RE.search(str(key)):
+            key_cn = str(key)
+        else:
+            logger.bind(tag=TAG).warning(
+                f"[STATUS] 跳过未映射的内部状态字段: key={key!r}, value={value!r}"
+            )
+            return None
 
     if key == "view":
         return f"视场{value_cn}"
@@ -261,15 +318,22 @@ def _format_status_part(key: str, value: object) -> str:
 
 def _format_device_status(vc, dev_id: str, status: dict) -> str:
     """将单个设备的状态字典格式化为中文播报。"""
+    if not vc.is_valid_device(dev_id):
+        logger.bind(tag=TAG).warning(
+            f"[STATUS] 跳过车型未配置的设备状态: device={dev_id!r}"
+        )
+        return ""
     dev_cn = vc.device_cn_name(dev_id)
     parts = []
     for key, value in status.items():
         if _should_skip_status_value(key, value, status):
             continue
-        parts.append(_format_status_part(key, value))
+        part = _format_status_part(key, value)
+        if part:
+            parts.append(part)
     if not parts:
         return f"{dev_cn}无状态信息"
-    return f"{dev_cn}：{'，'.join(parts)}"
+    return f"{dev_cn}{'，'.join(parts)}"
 
 
 # ── 插件主函数 ────────────────────────────────────────────────────────────────
@@ -279,20 +343,20 @@ def vehicle_status(
     target: str = None,
 ) -> ActionResponse:
     vc = _get_vc_profile(conn)
+    requested_target = target
+    query_target, filter_targets = _resolve_status_scope(conn, vc, target)
 
     # 校验 target（如果指定了）
-
-    if target and not vc.is_valid_device(target):
-        valid_devices = list(vc.devices.keys())
-        dev_cn = target
+    if query_target and not vc.is_valid_device(query_target):
+        dev_cn = query_target
         return ActionResponse(
             action=Action.RESPONSE,
-            result=json.dumps({"error": f"未知设备 {target}"}, ensure_ascii=False),
+            result=json.dumps({"error": f"未知设备 {query_target}"}, ensure_ascii=False),
             response=f"当前车型不支持{dev_cn}",
         )
 
     # 查询设备端
-    result = _query_status(conn, target)
+    result = _query_status(conn, query_target)
 
     if "error" in result:
         return ActionResponse(
@@ -302,6 +366,9 @@ def vehicle_status(
         )
 
     devices = result.get("devices", {})
+    if filter_targets:
+        allowed = set(filter_targets)
+        devices = {k: v for k, v in devices.items() if k in allowed}
     # 剔除无状态信息的设备（如桅杆在无侦察状态时为空字典）
     devices = {k: v for k, v in devices.items() if v}
 
@@ -315,10 +382,23 @@ def vehicle_status(
     # 格式化播报
     lines = []
     for dev_id, status in devices.items():
-        lines.append(_format_device_status(vc, dev_id, status))
+        line = _format_device_status(vc, dev_id, status)
+        if line:
+            lines.append(line)
 
-    response = "；".join(lines)
-    logger.bind(tag=TAG).info(f"[vehicle_status] target={target or 'all'} reply={response!r}")
+    if not lines:
+        return ActionResponse(
+            action=Action.RESPONSE,
+            result=json.dumps(result, ensure_ascii=False),
+            response="未获取到可播报的设备状态",
+        )
+
+    response = "。".join(lines) + "。"
+    logger.bind(tag=TAG).info(
+        f"[vehicle_status] requested={requested_target or 'all'} "
+        f"query={query_target or 'all'} filter={filter_targets or 'all'} "
+        f"reply={response!r}"
+    )
 
     return ActionResponse(
         action=Action.RESPONSE,

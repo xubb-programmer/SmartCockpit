@@ -166,5 +166,34 @@ class UrlTests(unittest.TestCase):
             video_stream.validate_stream_url("http://camera/live")
 
 
+class VideoLayoutContractTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        web_root = Path(__file__).parents[1] / "web"
+        cls.index_source = (web_root / "index.html").read_text(encoding="utf-8")
+        cls.style_source = (web_root / "css" / "style.css").read_text(
+            encoding="utf-8"
+        )
+        cls.controller_source = (
+            web_root / "js" / "ui" / "video-controller.js"
+        ).read_text(encoding="utf-8")
+
+    def test_fullscreen_button_is_inside_video_stage(self):
+        stage_start = self.index_source.index('id="videoStage"')
+        button_position = self.index_source.index('id="videoFullscreenBtn"')
+        stage_end = self.index_source.index("</section>", stage_start)
+
+        self.assertLess(stage_start, button_position)
+        self.assertLess(button_position, stage_end)
+        self.assertIn('class="video-fullscreen-btn"', self.index_source)
+
+    def test_fullscreen_button_is_anchored_to_top_right(self):
+        self.assertIn(".video-fullscreen-btn {", self.style_source)
+        self.assertIn("top: 12px;", self.style_source)
+        self.assertIn("right: 12px;", self.style_source)
+        self.assertIn("is-fullscreen", self.controller_source)
+        self.assertIn("恢复默认尺寸", self.controller_source)
+
+
 if __name__ == "__main__":
     unittest.main()

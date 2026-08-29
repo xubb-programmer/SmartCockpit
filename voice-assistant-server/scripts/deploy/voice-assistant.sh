@@ -4,14 +4,14 @@
 # 运行环境：RK3588
 #
 # 用法
-#   ./voice-assistant.sh start [模型参数...] [--no-vision] [--no-follow] [--open-browser]
+#   ./voice-assistant.sh start [模型参数...] [--vision] [--no-follow] [--open-browser]
 #   ./voice-assistant.sh stop
 #   ./voice-assistant.sh restart [同上]
 #   ./voice-assistant.sh status
-#   ./voice-assistant.sh desktop [同上]   # 桌面启动：后台启动并打开浏览器
+#   ./voice-assistant.sh desktop         # 检查后台就绪后打开浏览器
 #
 # 模型参数（与旧 start.sh 兼容）
-#   3b | 7b | qwen3-1.7b | 1.5b-z1 | qwen3-4b
+#   qwen3.5 | qwen3.5-2b | 3b | 7b | qwen3-1.7b | qwen3-4b
 # ============================================================
 
 set -e
@@ -28,22 +28,32 @@ LOCAL_IP=$(hostname -I 2>/dev/null | awk '{print $1}')
 LOCAL_IP=${LOCAL_IP:-127.0.0.1}
 
 RKLLM_PORT=18080
-VISION_PORT=18090
+# 18081 仅用于清理旧版双实例部署，新版本统一使用 18080 单实例。
+LEGACY_VISION_RKLLM_PORT=18081
 VOICE_ASSISTANT_WS_PORT=18000
 VOICE_ASSISTANT_HTTP_PORT=18003
 WEB_HTTP_PORT=18006
 WEB_HTTPS_PORT=18007
 
-VISION_RKNN_MODEL="${MODEL_DIR}/qwen3-vl-2b_vision_rk3588.rknn"
-VISION_RKLLM_MODEL="${MODEL_DIR}/qwen3-vl-2b-instruct_w8a8_rk3588.rkllm"
+VISION_RKNN_MODEL="${VISION_RKNN_MODEL:-}"
+# 视觉播报限定为短句，减少 0.8B 多模态生成尾延时；可用环境变量覆盖。
+VISION_MAX_NEW_TOKENS="${VISION_MAX_NEW_TOKENS:-48}"
+RKLLM_TEXT_MAX_NEW_TOKENS="${RKLLM_TEXT_MAX_NEW_TOKENS:-256}"
+VISION_NPU_CORE="${VISION_NPU_CORE:-3}"
+VISION_IMAGE_WIDTH="${VISION_IMAGE_WIDTH:-448}"
+VISION_IMAGE_HEIGHT="${VISION_IMAGE_HEIGHT:-448}"
+VISION_PREENCODE_PATH="${VISION_PREENCODE_PATH:-/tmp/voice_assistant_latest_vision.jpg}"
+VISION_PREENCODE_INTERVAL="${VISION_PREENCODE_INTERVAL:-1.0}"
+VISION_IMG_START="${VISION_IMG_START:-<|vision_start|>}"
+VISION_IMG_END="${VISION_IMG_END:-<|vision_end|>}"
+VISION_IMG_CONTENT="${VISION_IMG_CONTENT:-<|image_pad|>}"
 
 RKLLM_PID_FILE="/tmp/rkllm_server.pid"
-VISION_PID_FILE="/tmp/vision_server.pid"
+LEGACY_VISION_RKLLM_PID_FILE="/tmp/rkllm_vision_server.pid"
 VOICE_ASSISTANT_PID_FILE="/tmp/voice_assistant_server.pid"
 WEB_HTTP_PID_FILE="/tmp/web_http_server.pid"
 WEB_HTTPS_PID_FILE="/tmp/web_https_server.pid"
 RKLLM_LOG="/tmp/rkllm_server.log"
-VISION_LOG="/tmp/vision_server.log"
 VOICE_ASSISTANT_LOG="/tmp/voice_assistant_server.log"
 WEB_HTTP_LOG="/tmp/web_http_server.log"
 WEB_HTTPS_LOG="/tmp/web_https_server.log"
@@ -69,6 +79,14 @@ wait_for_port() {
 
 is_running() { [ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null; }
 
+rkllm_vision_enabled() {
+    local pid
+    is_running "${RKLLM_PID_FILE}" || return 1
+    pid=$(cat "${RKLLM_PID_FILE}")
+    [ -r "/proc/${pid}/cmdline" ] \
+        && tr '\0' ' ' < "/proc/${pid}/cmdline" | grep -q -- '--vision_rknn_model_path'
+}
+
 # 清理失效 pid，避免误判“已运行”或残留干扰
 clear_stale_pid() {
     local pid_file=$1
@@ -87,11 +105,12 @@ acquire_start_lock() {
 }
 
 release_npu_soft() {
-    # 轻量释放：杀掉残留 llm/vision
+    # 轻量释放：杀掉残留 llm 以及历史版本独立视觉进程
     pkill -f 'llm_server.py' 2>/dev/null || true
-    pkill -f 'vision_server.py' 2>/dev/null || true
+    pkill -f '[v]ision_server.py' 2>/dev/null || true
     clear_stale_pid "${RKLLM_PID_FILE}"
-    clear_stale_pid "${VISION_PID_FILE}"
+    clear_stale_pid "${LEGACY_VISION_RKLLM_PID_FILE}"
+    rm -f /tmp/vision_server.pid
     sleep 1
     if sudo -n true 2>/dev/null; then
         sudo sync 2>/dev/null || true
@@ -185,19 +204,64 @@ open_browser() {
     fi
 }
 
+show_desktop_message() {
+    local title="$1"
+    local message="$2"
+    if command -v zenity >/dev/null 2>&1; then
+        zenity --warning --title="${title}" --text="${message}" --width=430 >/dev/null 2>&1 || true
+    elif command -v xmessage >/dev/null 2>&1; then
+        xmessage -center -title "${title}" "${message}" >/dev/null 2>&1 || true
+    elif command -v notify-send >/dev/null 2>&1; then
+        notify-send -u normal "${title}" "${message}" >/dev/null 2>&1 || true
+    else
+        warn "${title}: ${message}"
+    fi
+}
+
+desktop_backend_ready() {
+    if ! systemctl is-enabled --quiet voice-assistant.service 2>/dev/null; then
+        show_desktop_message "语音助手未配置自启" "未检测到 voice-assistant.service，请先配置开机自启动。"
+        return 1
+    fi
+
+    if ! systemctl is-active --quiet voice-assistant.service 2>/dev/null; then
+        if systemctl is-failed --quiet voice-assistant.service 2>/dev/null; then
+            show_desktop_message "语音助手启动失败" "后台语音服务启动失败，请查看：journalctl -u voice-assistant.service -b"
+        else
+            show_desktop_message "语音助手正在启动" "后台服务尚未完成启动，请稍候几秒后再次双击桌面图标。"
+        fi
+        return 1
+    fi
+
+    for port in "${VOICE_ASSISTANT_WS_PORT}" "${VOICE_ASSISTANT_HTTP_PORT}" "${WEB_HTTP_PORT}" "${WEB_HTTPS_PORT}" "${RKLLM_PORT}"; do
+        if ! ss -H -ltn 2>/dev/null | grep -q ":${port}[[:space:]]"; then
+            show_desktop_message "语音助手正在启动" "后台服务已启动但端口 ${port} 尚未就绪，请稍候几秒后再次双击桌面图标。"
+            return 1
+        fi
+    done
+    return 0
+}
+
+do_desktop() {
+    if desktop_backend_ready; then
+        open_browser "${WEB_URL}"
+    fi
+}
+
 print_summary() {
     section "服务已就绪"
-    echo -e "  ${GREEN}RKLLM Server${NC}    PID=$(cat ${RKLLM_PID_FILE} 2>/dev/null)  日志: ${RKLLM_LOG}"
-    if [ -f "${VISION_PID_FILE}" ] && is_running "${VISION_PID_FILE}"; then
-        echo -e "  ${GREEN}Vision Server${NC}   PID=$(cat ${VISION_PID_FILE} 2>/dev/null)  日志: ${VISION_LOG}"
+    if rkllm_vision_enabled; then
+        echo -e "  ${GREEN}RKLLM 多模态服务${NC} PID=$(cat ${RKLLM_PID_FILE} 2>/dev/null)  日志: ${RKLLM_LOG}"
+    else
+        echo -e "  ${GREEN}RKLLM 文本服务${NC}  PID=$(cat ${RKLLM_PID_FILE} 2>/dev/null)  日志: ${RKLLM_LOG}"
     fi
     echo -e "  ${GREEN}voice-assistant-server${NC}  PID=$(cat ${VOICE_ASSISTANT_PID_FILE} 2>/dev/null)  日志: ${VOICE_ASSISTANT_LOG}"
     echo -e "  ${GREEN}Web HTTP${NC}       PID=$(cat ${WEB_HTTP_PID_FILE} 2>/dev/null)  日志: ${WEB_HTTP_LOG}"
     echo -e "  ${GREEN}Web HTTPS/WSS${NC}  PID=$(cat ${WEB_HTTPS_PID_FILE} 2>/dev/null)  日志: ${WEB_HTTPS_LOG}"
     echo
     echo -e "  RKLLM API : ${CYAN}http://${LOCAL_IP}:${RKLLM_PORT}/rkllm_chat${NC}"
-    if [ -f "${VISION_PID_FILE}" ] && is_running "${VISION_PID_FILE}"; then
-        echo -e "  Vision API: ${CYAN}http://${LOCAL_IP}:${VISION_PORT}/vision/analyze${NC}"
+    if rkllm_vision_enabled; then
+        echo -e "  Vision API: ${CYAN}http://${LOCAL_IP}:${RKLLM_PORT}/vision/analyze${NC}  ${YELLOW}(同一多模态实例)${NC}"
     fi
     echo
     echo -e "  ${YELLOW}[本机浏览器]${NC}"
@@ -212,8 +276,7 @@ print_summary() {
 do_status() {
     section "服务状态"
     for item in \
-        "RKLLM Server|${RKLLM_PID_FILE}|${RKLLM_PORT}" \
-        "Vision Server|${VISION_PID_FILE}|${VISION_PORT}" \
+        "RKLLM|${RKLLM_PID_FILE}|${RKLLM_PORT}" \
         "voice-assistant|${VOICE_ASSISTANT_PID_FILE}|${VOICE_ASSISTANT_WS_PORT}" \
         "Web HTTP|${WEB_HTTP_PID_FILE}|${WEB_HTTP_PORT}" \
         "Web HTTPS|${WEB_HTTPS_PID_FILE}|${WEB_HTTPS_PORT}"
@@ -225,6 +288,11 @@ do_status() {
             echo -e "  ${RED}○${NC} ${name}  未运行"
         fi
     done
+    if rkllm_vision_enabled; then
+        echo -e "  ${GREEN}●${NC} 视觉分析  与 RKLLM 共用 port=${RKLLM_PORT}"
+    else
+        echo -e "  ${YELLOW}○${NC} 视觉分析  未启用"
+    fi
     echo
     echo -e "  Web: ${CYAN}${WEB_URL}${NC}"
 }
@@ -239,11 +307,22 @@ do_stop() {
     section "停止 Web 客户端 HTTPS/WSS 网关"
     stop_process "Web HTTPS/WSS网关" "${WEB_HTTPS_PID_FILE}" 5 3 "https_gateway.py|https_server.py"
 
-    section "停止视觉分析服务"
-    stop_process "视觉服务" "${VISION_PID_FILE}" 15 5 "vision_server.py"
+    section "清理旧版 RKLLM 多模态服务"
+    stop_process "旧版 RKLLM 多模态服务" "${LEGACY_VISION_RKLLM_PID_FILE}" 20 5 "llm_server.py.*--port ${LEGACY_VISION_RKLLM_PORT}"
 
-    section "停止 RKLLM Server 并释放 NPU 资源"
-    stop_process "RKLLM Server" "${RKLLM_PID_FILE}" 20 5 "llm_server.py"
+    section "清理历史独立视觉进程"
+    LEGACY_VISION_PIDS=$(pgrep -f "[v]ision_server.py" 2>/dev/null || true)
+    if [ -n "${LEGACY_VISION_PIDS}" ]; then
+        warn "发现历史独立视觉进程，准备清理: ${LEGACY_VISION_PIDS}"
+        kill -TERM ${LEGACY_VISION_PIDS} 2>/dev/null || true
+        sleep 1
+    else
+        info "无历史独立视觉进程"
+    fi
+    rm -f /tmp/vision_server.pid
+
+    section "停止 RKLLM 文本服务并释放 NPU 资源"
+    stop_process "RKLLM 文本服务" "${RKLLM_PID_FILE}" 20 5 "llm_server.py.*--port ${RKLLM_PORT}"
 
     section "资源检查"
     sleep 1
@@ -252,13 +331,18 @@ do_stop() {
     else
         info "✓ RKLLM 端口 ${RKLLM_PORT} 已释放"
     fi
+    if ss -tlnp 2>/dev/null | grep -q ":${LEGACY_VISION_RKLLM_PORT} "; then
+        warn "旧版端口 ${LEGACY_VISION_RKLLM_PORT} 仍被占用："; ss -tlnp | grep ":${LEGACY_VISION_RKLLM_PORT} " || true
+    else
+        info "✓ 旧版多模态端口 ${LEGACY_VISION_RKLLM_PORT} 已释放"
+    fi
 
     LEFTOVER_RKLLM=$(pgrep -f "llm_server.py" 2>/dev/null || true)
-    LEFTOVER_VISION=$(pgrep -f "vision_server.py" 2>/dev/null || true)
+    LEFTOVER_LEGACY_VISION=$(pgrep -f "[v]ision_server.py" 2>/dev/null || true)
     LEFTOVER_VOICE_ASSISTANT=$(pgrep -f "voice_assistant.*app.py" 2>/dev/null || true)
-    if [ -n "${LEFTOVER_RKLLM}" ] || [ -n "${LEFTOVER_VISION}" ] || [ -n "${LEFTOVER_VOICE_ASSISTANT}" ]; then
-        warn "发现残留进程，强制清理: ${LEFTOVER_RKLLM} ${LEFTOVER_VISION} ${LEFTOVER_VOICE_ASSISTANT}"
-        kill -KILL ${LEFTOVER_RKLLM} ${LEFTOVER_VISION} ${LEFTOVER_VOICE_ASSISTANT} 2>/dev/null || true
+    if [ -n "${LEFTOVER_RKLLM}" ] || [ -n "${LEFTOVER_LEGACY_VISION}" ] || [ -n "${LEFTOVER_VOICE_ASSISTANT}" ]; then
+        warn "发现残留进程，强制清理: ${LEFTOVER_RKLLM} ${LEFTOVER_LEGACY_VISION} ${LEFTOVER_VOICE_ASSISTANT}"
+        kill -KILL ${LEFTOVER_RKLLM} ${LEFTOVER_LEGACY_VISION} ${LEFTOVER_VOICE_ASSISTANT} 2>/dev/null || true
     fi
 
     ZOMBIE_PIDS=$(ps -eo pid,stat,comm 2>/dev/null | awk '$2~/Z/ && $3~/python3?/ {print $1}' || true)
@@ -290,30 +374,61 @@ do_stop() {
     info "✓ 所有服务已停止"
 }
 
+selected_model_from_args() {
+    local selected="${VOICE_ASSISTANT_MODEL:-qwen3.5-0.8b}"
+    local arg
+    for arg in "$@"; do
+        case "${arg}" in
+            qwen3.5|qwen35|qwen3.5-0.8b|qwen35-0.8b) selected="qwen3.5-0.8b" ;;
+            qwen3.5-2b|qwen35-2b) selected="qwen3.5-2b" ;;
+            3b|7b|qwen3-1.7b|qwen3-4b) selected="${arg}" ;;
+        esac
+    done
+    echo "${selected}"
+}
+
+validate_start_request() {
+    local selected
+    local vision_requested=false
+    local arg
+    selected=$(selected_model_from_args "$@")
+    for arg in "$@"; do
+        [ "${arg}" = "--vision" ] && vision_requested=true
+    done
+
+    if [[ "${vision_requested}" == "true" && "${selected}" != qwen3.5-* ]]; then
+        error "模型 ${selected} 是纯文本模型，不支持 --vision"
+        error "请改用: $0 start qwen3.5 --vision --no-follow"
+        return 1
+    fi
+}
+
 do_start() {
     local FOLLOW_LOGS=true
     local OPEN_BROWSER=false
-    local MODEL_SIZE="qwen3-4b"
-    local ENABLE_VISION=true
-    local START_ARGS=()
+    local MODEL_SIZE="${VOICE_ASSISTANT_MODEL:-qwen3.5-0.8b}"
+    local ENABLE_VISION=false
 
     for arg in "$@"; do
         case "$arg" in
-            --no-vision)   ENABLE_VISION=false ;;
+            --vision)      ENABLE_VISION=true ;;
             --no-follow)   FOLLOW_LOGS=false ;;
             --open-browser) OPEN_BROWSER=true ;;
-            3b|7b|qwen3-1.7b|1.5b-z1|qwen3-4b) MODEL_SIZE="$arg" ;;
-            *) START_ARGS+=("$arg") ;;
+            qwen3.5|qwen35|qwen3.5-0.8b|qwen35-0.8b) MODEL_SIZE="qwen3.5-0.8b" ;;
+            qwen3.5-2b|qwen35-2b) MODEL_SIZE="qwen3.5-2b" ;;
+            3b|7b|qwen3-1.7b|qwen3-4b) MODEL_SIZE="$arg" ;;
+            *) error "未知启动参数: ${arg}"; usage; exit 1 ;;
         esac
     done
 
-    local MODEL_PATH MODEL_LABEL MAX_CTX
+    local MODEL_PATH MODEL_LABEL MODEL_CACHE_KEY MAX_CTX
     case "${MODEL_SIZE}" in
-      3b)           MODEL_PATH="${MODEL_DIR}/qwen2.5-3b_w8a8.rkllm";        MODEL_LABEL="qwen2.5-3b";        MAX_CTX=4096 ;;
-      7b)           MODEL_PATH="${MODEL_DIR}/qwen2.5-7b_w8a8.rkllm";        MODEL_LABEL="qwen2.5-7b";        MAX_CTX=4096 ;;
-      qwen3-1.7b)   MODEL_PATH="${MODEL_DIR}/qwen3-1.7b_w8a8.rkllm";       MODEL_LABEL="qwen3-1.7b";       MAX_CTX=4096 ;;
-      1.5b-z1)      MODEL_PATH="${MODEL_DIR}/Qwen2.5-1.5B-Z1-FC_W8A8_RK3588.rkllm"; MODEL_LABEL="Qwen2.5-1.5B-Z1-FC"; MAX_CTX=4096 ;;
-      *)            MODEL_PATH="${MODEL_DIR}/qwen3-4b-instruct_w8a8.rkllm"; MODEL_LABEL="qwen3-4b-instruct"; MAX_CTX=4096 ;;
+      qwen3.5-0.8b) MODEL_PATH="${MODEL_DIR}/Qwen3.5-0.8B_w8a8_rk3588.rkllm"; MODEL_LABEL="Qwen3.5-0.8B"; MODEL_CACHE_KEY="qwen3.5-0.8b"; MAX_CTX=4096 ;;
+      qwen3.5-2b)   MODEL_PATH="${MODEL_DIR}/qwen3.5-2b_w8a8_rk3588.rkllm";  MODEL_LABEL="Qwen3.5-2B";   MODEL_CACHE_KEY="qwen3.5-2b";   MAX_CTX=4096 ;;
+      3b)           MODEL_PATH="${MODEL_DIR}/qwen2.5-3b_w8a8.rkllm";        MODEL_LABEL="qwen2.5-3b";        MODEL_CACHE_KEY="qwen2.5-3b"; MAX_CTX=4096 ;;
+      7b)           MODEL_PATH="${MODEL_DIR}/qwen2.5-7b_w8a8.rkllm";        MODEL_LABEL="qwen2.5-7b";        MODEL_CACHE_KEY="qwen2.5-7b"; MAX_CTX=4096 ;;
+      qwen3-1.7b)   MODEL_PATH="${MODEL_DIR}/qwen3-1.7b_w8a8.rkllm";       MODEL_LABEL="qwen3-1.7b";       MODEL_CACHE_KEY="qwen3-1.7b"; MAX_CTX=4096 ;;
+      *)            MODEL_PATH="${MODEL_DIR}/qwen3-4b-instruct_w8a8.rkllm"; MODEL_LABEL="qwen3-4b-instruct"; MODEL_CACHE_KEY="qwen3-4b-instruct"; MAX_CTX=4096 ;;
     esac
 
     section "环境准备"
@@ -323,7 +438,7 @@ do_start() {
     acquire_start_lock
 
     clear_stale_pid "${RKLLM_PID_FILE}"
-    clear_stale_pid "${VISION_PID_FILE}"
+    clear_stale_pid "${LEGACY_VISION_RKLLM_PID_FILE}"
     clear_stale_pid "${VOICE_ASSISTANT_PID_FILE}"
     clear_stale_pid "${WEB_HTTP_PID_FILE}"
     clear_stale_pid "${WEB_HTTPS_PID_FILE}"
@@ -346,9 +461,72 @@ do_start() {
         export OPENSSL_CONF=/etc/ssl/openssl.cnf
     fi
 
-    section "启动 RKLLM Server (模型: ${MODEL_LABEL})"
+    local EFFECTIVE_VISION_RKNN_MODEL="${VISION_RKNN_MODEL}"
+    local VISION_ARGS=()
+    if [[ -z "${EFFECTIVE_VISION_RKNN_MODEL}" ]]; then
+        case "${MODEL_SIZE}" in
+          qwen3.5-0.8b) EFFECTIVE_VISION_RKNN_MODEL="${MODEL_DIR}/Qwen3.5-0.8B_vision_rk3588.rknn" ;;
+          qwen3.5-2b)   EFFECTIVE_VISION_RKNN_MODEL="${MODEL_DIR}/qwen3.5-2b_vision_rk3588.rknn" ;;
+        esac
+    fi
+    if [[ "${ENABLE_VISION}" == "true" ]]; then
+        [ -n "${EFFECTIVE_VISION_RKNN_MODEL}" ] || { error "模型 ${MODEL_LABEL} 未配置配套视觉编码器"; exit 1; }
+        [ -f "${EFFECTIVE_VISION_RKNN_MODEL}" ] || { error "视觉编码器模型不存在: ${EFFECTIVE_VISION_RKNN_MODEL}"; exit 1; }
+        VISION_ARGS=(
+            --vision_rknn_model_path "${EFFECTIVE_VISION_RKNN_MODEL}"
+            --vision_npu_core "${VISION_NPU_CORE}"
+            --vision_max_new_tokens "${VISION_MAX_NEW_TOKENS}"
+            --vision_image_width "${VISION_IMAGE_WIDTH}"
+            --vision_image_height "${VISION_IMAGE_HEIGHT}"
+            --vision_preencode_path "${VISION_PREENCODE_PATH}"
+            --vision_preencode_interval "${VISION_PREENCODE_INTERVAL}"
+            --vision_img_start "${VISION_IMG_START}"
+            --vision_img_end "${VISION_IMG_END}"
+            --vision_img_content "${VISION_IMG_CONTENT}"
+        )
+        info "启用官方单实例多模态模式: ${MODEL_LABEL} + $(basename "${EFFECTIVE_VISION_RKNN_MODEL}")"
+    else
+        info "默认不启动视觉服务；需要时请添加 --vision"
+    fi
+
+    export VOICE_ASSISTANT_VISION_ENABLED="${ENABLE_VISION}"
+    local PROMPT_MODE="novision"
+    local PROMPT_MODE_ARGS=()
+    if [[ "${ENABLE_VISION}" == "true" ]]; then
+        PROMPT_MODE="vision"
+        PROMPT_MODE_ARGS=(--vision)
+    fi
+    local SYSTEM_PROMPT_FILE="${MODEL_DIR}/voice_assistant_static_prompt_${PROMPT_MODE}.txt"
+    local PROMPT_RENDERER="${SCRIPT_DIR}/render_static_prompt.py"
+    if [ ! -f "${PROMPT_RENDERER}" ]; then
+        error "静态提示词渲染器不存在: ${PROMPT_RENDERER}"
+        exit 1
+    fi
+    if ! python3 "${PROMPT_RENDERER}" --output "${SYSTEM_PROMPT_FILE}" "${PROMPT_MODE_ARGS[@]}"; then
+        error "生成 ${PROMPT_MODE} 模式静态提示词失败"
+        exit 1
+    fi
+    info "RKLLM 预热提示词模式: ${PROMPT_MODE}"
+
+    export LD_LIBRARY_PATH="${RKLLM_SERVER_DIR}/lib:${LD_LIBRARY_PATH}"
+
+    if [[ "${ENABLE_VISION}" == "true" ]]; then
+        section "启动 RKLLM 多模态服务 (模型: ${MODEL_LABEL})"
+    else
+        section "启动 RKLLM 文本服务 (模型: ${MODEL_LABEL})"
+    fi
     if is_running "${RKLLM_PID_FILE}"; then
-        warn "RKLLM Server 已在运行 (PID=$(cat ${RKLLM_PID_FILE}))"
+        if ss -tlnp 2>/dev/null | grep -q ":${RKLLM_PORT} "; then
+            if [[ "${ENABLE_VISION}" == "true" ]] && ! rkllm_vision_enabled; then
+                error "当前 RKLLM 是纯文本模式；请使用 restart 重新加载多模态模型"
+                exit 1
+            fi
+            warn "RKLLM Server 已在运行 (PID=$(cat ${RKLLM_PID_FILE}))"
+        else
+            error "RKLLM PID 存在但端口 ${RKLLM_PORT} 未监听，拒绝启动上层服务"
+            tail -20 "${RKLLM_LOG}" || true
+            exit 1
+        fi
     else
         [ ! -f "${MODEL_PATH}" ] && { error "模型文件不存在: ${MODEL_PATH}"; exit 1; }
         if ss -tlnp 2>/dev/null | grep -q ":${RKLLM_PORT} "; then
@@ -365,18 +543,22 @@ do_start() {
         fi
 
         cd "${RKLLM_SERVER_DIR}"
-        PROMPT_CACHE_PATH="${MODEL_DIR}/voice_assistant_system_prompt.cache"
-        SYSTEM_PROMPT_FILE="${MODEL_DIR}/voice_assistant_static_prompt.txt"
-        WARMUP_ARGS=""
+        PROMPT_CACHE_ARGS=()
+        if [[ "${MODEL_SIZE}" == qwen3.5-* ]]; then
+            warn "Qwen3.5 RKLLM 不支持保存 prompt cache 文件，启动时使用静态 prompt 预热"
+        else
+            PROMPT_CACHE_PATH="${MODEL_DIR}/voice_assistant_system_prompt_${MODEL_CACHE_KEY}_${PROMPT_MODE}.cache"
+            PROMPT_CACHE_ARGS=(--prompt_cache_path "${PROMPT_CACHE_PATH}")
+        fi
+
+        WARMUP_ARGS=()
         if [ -f "${SYSTEM_PROMPT_FILE}" ]; then
-            WARMUP_ARGS="--system_prompt_file ${SYSTEM_PROMPT_FILE}"
+            WARMUP_ARGS=(--system_prompt_file "${SYSTEM_PROMPT_FILE}")
             info "找到静态 prompt 文件，启动时将预热 set_function_tools"
         else
             warn "未找到 ${SYSTEM_PROMPT_FILE}，首次请求将有延迟"
             warn "请先运行: ./generate_prompt_cache.sh --force"
         fi
-
-        export LD_LIBRARY_PATH="${RKLLM_SERVER_DIR}/lib:${LD_LIBRARY_PATH}"
 
         local rkllm_ok=0
         local attempt
@@ -387,22 +569,27 @@ do_start() {
                 --rkllm_model_path "${MODEL_PATH}" \
                 --target_platform  "${PLATFORM}" \
                 --port "${RKLLM_PORT}" \
-                --prompt_cache_path "${PROMPT_CACHE_PATH}" \
+                "${PROMPT_CACHE_ARGS[@]}" \
                 --max_context_len  "${MAX_CTX}" \
-                ${WARMUP_ARGS}
-            info "RKLLM Server 已启动 (PID=$(cat ${RKLLM_PID_FILE})) attempt=${attempt}"
+                --text_max_new_tokens "${RKLLM_TEXT_MAX_NEW_TOKENS}" \
+                "${WARMUP_ARGS[@]}" \
+                "${VISION_ARGS[@]}"
+            info "RKLLM 服务已启动 (PID=$(cat ${RKLLM_PID_FILE})) attempt=${attempt}"
 
             printf "加载中..."
             if wait_for_port "${RKLLM_PORT}" 90; then
-                info "RKLLM Server 就绪: http://${LOCAL_IP}:${RKLLM_PORT}/rkllm_chat"
+                info "RKLLM 文本服务就绪: http://${LOCAL_IP}:${RKLLM_PORT}/rkllm_chat"
+                if [[ "${ENABLE_VISION}" == "true" ]]; then
+                    info "视觉分析就绪: http://${LOCAL_IP}:${RKLLM_PORT}/vision/analyze"
+                    info "视觉参数: encoder=$(basename "${EFFECTIVE_VISION_RKNN_MODEL}"), max_tokens=${VISION_MAX_NEW_TOKENS}, preencode=${VISION_PREENCODE_INTERVAL}s"
+                fi
                 rkllm_ok=1
                 break
             fi
 
             if is_running "${RKLLM_PID_FILE}"; then
-                warn "端口未开但进程仍在运行，模型可能仍在加载，继续..."
-                rkllm_ok=1
-                break
+                error "RKLLM 进程仍在运行但端口未开放，模型启动异常，停止该进程"
+                stop_process "RKLLM 文本服务" "${RKLLM_PID_FILE}" 5 3 "llm_server.py.*--port ${RKLLM_PORT}"
             fi
 
             error "RKLLM Server 启动失败（attempt=${attempt}），查看日志："
@@ -417,45 +604,6 @@ do_start() {
         if [ "${rkllm_ok}" != "1" ]; then
             error "RKLLM Server 两次启动均失败，中止后续服务启动"
             exit 1
-        fi
-    fi
-
-    if [[ "${ENABLE_VISION}" == "true" && -f "${VISION_RKNN_MODEL}" && -f "${VISION_RKLLM_MODEL}" ]]; then
-        section "启动视觉分析服务"
-        if is_running "${VISION_PID_FILE}"; then
-            warn "视觉服务已在运行 (PID=$(cat ${VISION_PID_FILE}))"
-        else
-            if ss -tlnp 2>/dev/null | grep -q ":${VISION_PORT} "; then
-                error "端口 ${VISION_PORT} 已被占用"; ss -tlnp | grep ":${VISION_PORT} "; exit 1
-            fi
-            cd "${RKLLM_SERVER_DIR}"
-            export LD_LIBRARY_PATH="${RKLLM_SERVER_DIR}/lib:${LD_LIBRARY_PATH}"
-            start_detached "${VISION_LOG}" "${VISION_PID_FILE}" \
-                python3 vision_server.py \
-                --rknn_model "${VISION_RKNN_MODEL}" \
-                --rkllm_model "${VISION_RKLLM_MODEL}" \
-                --npu_core 1 \
-                --port "${VISION_PORT}"
-            info "视觉服务已启动 (PID=$(cat ${VISION_PID_FILE}))"
-            printf "加载中..."
-            if wait_for_port "${VISION_PORT}" 120; then
-                info "视觉服务就绪: http://0.0.0.0:${VISION_PORT}/health"
-            else
-                if is_running "${VISION_PID_FILE}"; then
-                    warn "端口未开但进程仍在运行，模型可能仍在加载，继续..."
-                else
-                    error "视觉服务启动失败，查看日志："; tail -20 "${VISION_LOG}"
-                    warn "视觉服务启动失败，其他服务继续启动..."
-                    rm -f "${VISION_PID_FILE}"
-                fi
-            fi
-        fi
-    else
-        > "${VISION_LOG}" 2>/dev/null || true
-        if [[ "${ENABLE_VISION}" == "false" ]]; then
-            warn "已使用 --no-vision 参数，跳过视觉服务启动"
-        else
-            warn "视觉模型文件不存在，跳过视觉服务启动"
         fi
     fi
 
@@ -541,7 +689,7 @@ do_start() {
         info "停止服务请运行: $0 stop"
         info "正在显示实时日志（Ctrl+C 仅退出日志，服务不会停止）"
         echo -e "${CYAN}────────────────────── 实时日志 ──────────────────────${NC}"
-        tail -f "${RKLLM_LOG}" "${VISION_LOG}" "${VOICE_ASSISTANT_LOG}" "${WEB_HTTPS_LOG}" 2>/dev/null || true
+        tail -f "${RKLLM_LOG}" "${VOICE_ASSISTANT_LOG}" "${WEB_HTTPS_LOG}" 2>/dev/null || true
         echo
         info "已退出实时日志，服务仍在后台运行"
         info "再次查看日志请运行 ./logs.sh"
@@ -556,21 +704,24 @@ usage() {
 用法: $0 <命令> [选项]
 
 命令:
-  start     启动全部服务（默认跟随日志）
+  start     启动文本、语音和 Web 服务（默认跟随日志）
   stop      停止全部服务
   restart   先停后启
   status    查看运行状态
-  desktop   桌面启动：后台启动并自动打开浏览器
+  desktop   检查后台服务就绪后打开浏览器（不启动后端）
 
 启动选项:
-  3b | 7b | qwen3-1.7b | 1.5b-z1 | qwen3-4b
-  --no-vision
+  qwen3.5 | qwen3.5-2b | 3b | 7b | qwen3-1.7b | qwen3-4b
+  --vision      为 Qwen3.5 加载配套视觉编码器（纯文本模型不支持）
   --no-follow
   --open-browser
 
 示例:
   $0 start
-  $0 start 3b --no-follow
+  $0 start qwen3-4b --no-follow
+  $0 start qwen3-4b --vision       # 报错：纯文本模型不支持视觉
+  $0 start qwen3.5 --vision --no-follow
+  $0 start qwen3.5-2b --vision --no-follow
   $0 desktop
   $0 stop
 EOF
@@ -581,12 +732,14 @@ shift || true
 
 case "${CMD}" in
     start)
+        validate_start_request "$@"
         do_start "$@"
         ;;
     stop)
         do_stop
         ;;
     restart)
+        validate_start_request "$@"
         do_stop
         do_start "$@"
         ;;
@@ -594,8 +747,8 @@ case "${CMD}" in
         do_status
         ;;
     desktop)
-        # 桌面图标入口：不跟随日志，启动后打开本机 Web 页
-        do_start --no-follow --open-browser "$@"
+        # 桌面图标入口：只检查 systemd 服务，避免重复启动后端
+        do_desktop
         ;;
     -h|--help|help|"")
         usage

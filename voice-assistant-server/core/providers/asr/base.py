@@ -174,7 +174,11 @@ class ASRProviderBase(ABC):
 
             # 性能监控
             total_time = time.monotonic() - total_start_time
-            logger.bind(tag=TAG).debug(f"总处理耗时: {total_time:.3f}s")
+            conn.last_asr_completed_at = time.monotonic()
+            logger.bind(tag=TAG).info(
+                f"[性能][ASR] 识别耗时={total_time * 1000:.0f}毫秒，"
+                f"音频帧={len(asr_audio_task)}，文本长度={len(content_for_length_check)}"
+            )
 
             # 检查文本长度
             text_len, _ = remove_punctuation_and_length(content_for_length_check)

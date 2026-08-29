@@ -7,7 +7,7 @@ vehicle_control 车型能力描述数据类。
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List
+from typing import Any, Dict, List
 
 
 @dataclass
@@ -22,6 +22,7 @@ class VehicleControlProfile:
     vehicle_id: str                  # 车辆标识
     devices: Dict[str, DeviceSpec]   # device_id → DeviceSpec
     all_targets: Dict[str, List[str]] = field(default_factory=dict)
+    param_rules: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     # ──────────────────────────────────────────────────────────────
     @classmethod
@@ -48,10 +49,15 @@ class VehicleControlProfile:
                     str(target) for target in targets if isinstance(target, str)
                 ]
 
+        param_rules = vc.get("param_rules") or {}
+        if not isinstance(param_rules, dict):
+            param_rules = {}
+
         return cls(
             vehicle_id=vehicle_id,
             devices=devices,
             all_targets=all_targets,
+            param_rules=param_rules,
         )
 
     # ──────────────────────────────────────────────────────────────

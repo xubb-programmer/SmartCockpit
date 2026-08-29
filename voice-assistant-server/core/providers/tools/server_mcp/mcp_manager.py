@@ -24,8 +24,8 @@ class ServerMCPManager:
         self.config_path = get_project_dir() + "data/.mcp_server_settings.json"
         if not os.path.exists(self.config_path):
             self.config_path = ""
-            logger.bind(tag=TAG).warning(
-                f"请检查mcp服务配置文件：data/.mcp_server_settings.json"
+            logger.bind(tag=TAG).info(
+                "未配置可选的服务端MCP，跳过初始化"
             )
         self.clients: Dict[str, ServerMCPClient] = {}
         self.tools = []

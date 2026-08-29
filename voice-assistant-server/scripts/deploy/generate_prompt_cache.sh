@@ -3,21 +3,21 @@
 # 离线生成 RKLLM Prompt Cache
 # 用途：一次性 prefill 静态系统提示词并保存 KV 缓存到磁盘。
 #       flask_server.py 启动时自动加载，Turn 1 延迟从 ~4s 降至 ~0.5s。
-# 用法：./generate_prompt_cache.sh [--force]
+# 用法：./generate_prompt_cache.sh [模型参数] [--vision] [--force]
 #       --force : 强制重新生成（即使 cache 已存在）
+#       --vision: 生成视觉模式提示词（仅 Qwen3.5 支持）
 # ═══════════════════════════════════════════════════════════════════
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SERVER_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 
-# ── 配置（与 start.sh 保持一致）─────────────────────────────────
+# ── 配置（与 voice-assistant.sh 保持一致）─────────────────────────
 # 自动推导部署根目录：脚本在 voice-assistant-server/scripts/deploy/ 下
 HOME_DIR="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 MODEL_DIR="${HOME_DIR}/models"
 RKLLM_SERVER_DIR="${HOME_DIR}/rknn-server"
 PLATFORM="rk3588"
-CACHE_OUTPUT="${MODEL_DIR}/voice_assistant_system_prompt.cache"
 
 # ── 颜色 ──────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
@@ -27,28 +27,49 @@ error() { echo -e "${RED}[ERROR]${NC} $*"; }
 
 # ── 参数解析 ──────────────────────────────────────────────────────
 FORCE=false
-MODEL_SIZE="qwen3-4b"
+MODEL_SIZE="${VOICE_ASSISTANT_MODEL:-qwen3-4b}"
+ENABLE_VISION=false
 for arg in "$@"; do
     case "$arg" in
         --force)     FORCE=true ;;
+        --vision)    ENABLE_VISION=true ;;
+        qwen3.5|qwen35|qwen3.5-0.8b|qwen35-0.8b) MODEL_SIZE="qwen3.5-0.8b" ;;
+        qwen3.5-2b|qwen35-2b) MODEL_SIZE="qwen3.5-2b" ;;
         3b)          MODEL_SIZE="3b" ;;
         7b)          MODEL_SIZE="7b" ;;
         qwen3-1.7b)  MODEL_SIZE="qwen3-1.7b" ;;
         qwen3-4b)    MODEL_SIZE="qwen3-4b" ;;
-        1.5b-z1)     MODEL_SIZE="1.5b-z1" ;;
     esac
 done
 
+if [[ "${ENABLE_VISION}" == "true" && "${MODEL_SIZE}" != qwen3.5-* ]]; then
+    error "模型 ${MODEL_SIZE} 是纯文本模型，不支持 --vision"
+    exit 1
+fi
+
 case "${MODEL_SIZE}" in
-  3b)           MODEL_PATH="${MODEL_DIR}/qwen2.5-3b_w8a8.rkllm";        MAX_CTX=4096 ;;
-  7b)           MODEL_PATH="${MODEL_DIR}/qwen2.5-7b_w8a8.rkllm";        MAX_CTX=4096 ;;
-  qwen3-1.7b)   MODEL_PATH="${MODEL_DIR}/qwen3-1.7b_w8a8.rkllm";       MAX_CTX=4096 ;;
-  1.5b-z1)      MODEL_PATH="${MODEL_DIR}/Qwen2.5-1.5B-Z1-FC_W8A8_RK3588.rkllm"; MAX_CTX=4096 ;;
-  qwen3-4b|*)   MODEL_PATH="${MODEL_DIR}/qwen3-4b-instruct_w8a8.rkllm"; MAX_CTX=4096 ;;
+  qwen3.5-0.8b) MODEL_PATH="${MODEL_DIR}/Qwen3.5-0.8B_w8a8_rk3588.rkllm"; MODEL_CACHE_KEY="qwen3.5-0.8b"; MAX_CTX=4096 ;;
+  qwen3.5-2b)   MODEL_PATH="${MODEL_DIR}/qwen3.5-2b_w8a8_rk3588.rkllm";  MODEL_CACHE_KEY="qwen3.5-2b";   MAX_CTX=4096 ;;
+  3b)           MODEL_PATH="${MODEL_DIR}/qwen2.5-3b_w8a8.rkllm";        MODEL_CACHE_KEY="qwen2.5-3b"; MAX_CTX=4096 ;;
+  7b)           MODEL_PATH="${MODEL_DIR}/qwen2.5-7b_w8a8.rkllm";        MODEL_CACHE_KEY="qwen2.5-7b"; MAX_CTX=4096 ;;
+  qwen3-1.7b)   MODEL_PATH="${MODEL_DIR}/qwen3-1.7b_w8a8.rkllm";       MODEL_CACHE_KEY="qwen3-1.7b"; MAX_CTX=4096 ;;
+  qwen3-4b|*)   MODEL_PATH="${MODEL_DIR}/qwen3-4b-instruct_w8a8.rkllm"; MODEL_CACHE_KEY="qwen3-4b-instruct"; MAX_CTX=4096 ;;
 esac
 
+PROMPT_CACHE_SUPPORTED=true
+MULTIMODAL_ARGS=()
+if [[ "${MODEL_SIZE}" == qwen3.5-* ]]; then
+    PROMPT_CACHE_SUPPORTED=false
+fi
+PROMPT_MODE="novision"
+PROMPT_MODE_ARGS=()
+if [[ "${ENABLE_VISION}" == "true" ]]; then
+    PROMPT_MODE="vision"
+    PROMPT_MODE_ARGS=(--vision)
+fi
+CACHE_OUTPUT="${MODEL_DIR}/voice_assistant_system_prompt_${MODEL_CACHE_KEY}_${PROMPT_MODE}.cache"
 
-if [[ -f "$CACHE_OUTPUT" && "$FORCE" != true ]]; then
+if [[ "${PROMPT_CACHE_SUPPORTED}" == "true" && -f "$CACHE_OUTPUT" && "$FORCE" != true ]]; then
     info "Prompt cache 已存在: ${CACHE_OUTPUT}"
     info "大小: $(du -h "$CACHE_OUTPUT" | cut -f1)"
     info "如需重新生成，请运行: $0 --force"
@@ -148,6 +169,19 @@ print(rendered)
 PYEOF
 )
 
+# 使用与语音服务相同的配置加载和运行时能力裁剪逻辑重新渲染，
+# 确保预热提示词与实际首轮请求完全一致。
+PROMPT_TXT_OUTPUT="${MODEL_DIR}/voice_assistant_static_prompt_${PROMPT_MODE}.txt"
+PROMPT_RENDERER="${SCRIPT_DIR}/render_static_prompt.py"
+if [[ ! -f "${PROMPT_RENDERER}" ]]; then
+    error "静态提示词渲染器不存在: ${PROMPT_RENDERER}"
+    exit 1
+fi
+python3 "${PROMPT_RENDERER}" \
+    --output "${PROMPT_TXT_OUTPUT}" \
+    "${PROMPT_MODE_ARGS[@]}"
+STATIC_PROMPT="$(<"${PROMPT_TXT_OUTPUT}")"
+
 if [[ -z "$STATIC_PROMPT" ]]; then
     error "无法从配置文件解析静态提示词"
     exit 1
@@ -156,15 +190,24 @@ fi
 PROMPT_LEN=${#STATIC_PROMPT}
 info "静态提示词长度: ${PROMPT_LEN} 字符"
 echo "──────────────────────────────────────────"
-echo "$STATIC_PROMPT" | head -5
+sed -n '1,5p' <<< "$STATIC_PROMPT"
 echo "..."
 echo "──────────────────────────────────────────"
+
+echo "$STATIC_PROMPT" > "$PROMPT_TXT_OUTPUT"
+info "静态 prompt 文件: ${PROMPT_TXT_OUTPUT}"
+
+if [[ "${PROMPT_CACHE_SUPPORTED}" != "true" ]]; then
+    warn "Qwen3.5 RKLLM 不支持保存 prompt cache，已跳过 cache 生成"
+    warn "启动脚本会使用静态 prompt 预热 set_function_tools"
+    exit 0
+fi
 
 # ── 确保 RKLLM Server 未运行（释放 NPU）──────────────────────────
 if pgrep -f "llm_server.py" > /dev/null 2>&1; then
     warn "检测到 RKLLM Server 正在运行，需要先停止以释放 NPU"
-    if [[ -f "${SCRIPT_DIR}/stop.sh" ]]; then
-        bash "${SCRIPT_DIR}/stop.sh"
+    if [[ -x "${SCRIPT_DIR}/voice-assistant.sh" ]]; then
+        bash "${SCRIPT_DIR}/voice-assistant.sh" stop
         sleep 2
     else
         error "请先手动停止 RKLLM Server"
@@ -181,10 +224,10 @@ python3 generate_prompt_cache.py \
     --target_platform "$PLATFORM" \
     --max_context_len "$MAX_CTX" \
     --output "$CACHE_OUTPUT" \
+    "${MULTIMODAL_ARGS[@]}" \
     --prompt "$STATIC_PROMPT"
 
 # ── 验证 ──────────────────────────────────────────────────────────
-PROMPT_TXT_OUTPUT="${MODEL_DIR}/voice_assistant_static_prompt.txt"
 if [[ -f "$CACHE_OUTPUT" ]]; then
     CACHE_SIZE=$(du -h "$CACHE_OUTPUT" | cut -f1)
     info "✓ Prompt Cache 生成成功！"
@@ -195,7 +238,7 @@ if [[ -f "$CACHE_OUTPUT" ]]; then
     echo "$STATIC_PROMPT" > "$PROMPT_TXT_OUTPUT"
     info "  静态 prompt 文件: ${PROMPT_TXT_OUTPUT}"
     echo ""
-    info "现在可以启动服务: cd ${SCRIPT_DIR} && ./start.sh"
+    info "现在可以启动服务: cd ${SCRIPT_DIR} && ./voice-assistant.sh start --no-follow"
 else
     error "Prompt Cache 生成失败，文件不存在: ${CACHE_OUTPUT}"
     exit 1

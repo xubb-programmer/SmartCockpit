@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import sys
 import types
 import unittest
@@ -66,6 +67,114 @@ class ToolCallExtractionTests(unittest.TestCase):
         result = self.provider._finalize_buffer(tool_call)
 
         self.assertEqual(result, (f"<tool_call>{tool_call}</tool_call>", None))
+
+    def test_compact_control_is_normalized_to_legacy_envelope(self):
+        result = self.provider._finalize_buffer("@C|vis_cam|enable")
+
+        expected = '{"name":"vehicle_control","arguments":{"target":"vis_cam","action":"enable"}}'
+        self.assertEqual(result, (f"<tool_call>{expected}</tool_call>", None))
+
+    def test_finalizer_discards_text_before_a_compact_tool_protocol(self):
+        result = self.provider._finalize_buffer(
+            "身份说明不应播报\n@C|tracker|detect_on"
+        )
+
+        expected = '{"name":"vehicle_control","arguments":{"target":"tracker","action":"detect_on"}}'
+        self.assertEqual(result, (f"<tool_call>{expected}</tool_call>", None))
+
+    def test_compact_multi_target_and_params_are_preserved(self):
+        result = self.provider._finalize_buffer(
+            "@C|vis_cam,ir_cam|enable\n"
+            "@C|gimbal|scan_circle|direction=cw,count=3"
+        )
+
+        first = '{"name":"vehicle_control","arguments":{"target":["vis_cam","ir_cam"],"action":"enable"}}'
+        second = '{"name":"vehicle_control","arguments":{"target":"gimbal","action":"scan_circle","params":{"direction":"cw","count":"3"}}}'
+        self.assertEqual(
+            result,
+            (f"<tool_call>{first}</tool_call><tool_call>{second}</tool_call>", None),
+        )
+
+    def test_digital_zoom_parameter_uses_the_fourth_protocol_segment(self):
+        result = self.provider._finalize_buffer(
+            "@C|vis_cam|digital_zoom|zoom_level=4"
+        )
+
+        expected = (
+            '{"name":"vehicle_control","arguments":'
+            '{"target":"vis_cam","action":"digital_zoom",'
+            '"params":{"zoom_level":"4"}}}'
+        )
+        self.assertEqual(result, (f"<tool_call>{expected}</tool_call>", None))
+
+    def test_same_and_cross_device_actions_preserve_model_order(self):
+        calls = self.provider._extract_tool_calls(
+            "@C|vis_cam|enable\n"
+            "@C|vis_cam|brightness_up\n"
+            "@C|ir_cam|polarity_white\n"
+            "@C|gimbal|zero_return"
+        )
+
+        actions = [
+            json.loads(call)["arguments"]["action"]
+            for call in calls
+        ]
+        self.assertEqual(
+            actions,
+            ["enable", "brightness_up", "polarity_white", "zero_return"],
+        )
+
+    def test_compact_status_and_other_tools_are_supported(self):
+        calls = self.provider._extract_tool_calls(
+            "@S|all\n@V|画面里有什么\n@M|next\n@D|all\n@X"
+        )
+
+        self.assertEqual(len(calls), 5)
+        self.assertEqual(
+            calls[0],
+            '{"name":"vehicle_status","arguments":{}}',
+        )
+        self.assertIn('"name":"vision_analyze"', calls[1])
+        self.assertIn('"song_name":"next"', calls[2])
+        self.assertIn('"name":"get_datetime"', calls[3])
+        self.assertEqual(calls[4], '{"name":"handle_exit_intent","arguments":{}}')
+
+    def test_malformed_compact_control_is_not_executed(self):
+        self.assertEqual(self.provider._extract_compact_tool_calls("@C|vis_cam"), [])
+        self.assertEqual(
+            self.provider._extract_compact_tool_calls(
+                "@C|vis_cam|digital_zoom zoom_level=4"
+            ),
+            [],
+        )
+        self.assertEqual(
+            self.provider._extract_compact_tool_calls(
+                "@C|vis_cam|enable|brightness_up"
+            ),
+            [],
+        )
+
+    def test_streaming_punctuation_is_preserved(self):
+        self.assertTrue(rkllm._is_spoken_punctuation("，"))
+        self.assertTrue(rkllm._is_spoken_punctuation("。"))
+        self.assertEqual(self.provider._finalize_buffer("。"), ("。", None))
+
+    def test_english_words_are_removed_but_product_name_is_kept(self):
+        self.assertEqual(
+            rkllm._sanitize_spoken_text("Sure，我是Z1 assistant。"),
+            "我是Z1。",
+        )
+
+    def test_payload_isolates_session_and_limits_output(self):
+        self.provider.model_name = "qwen3.5-2b"
+        self.provider.max_tokens = 256
+        dialogue = [{"role": "system", "content": "系统"}, {"role": "user", "content": "你好"}]
+
+        payload = self.provider._build_payload("session-a", dialogue, reset_kv=True)
+
+        self.assertEqual(payload["conversation_id"], "session-a")
+        self.assertEqual(payload["max_tokens"], 256)
+        self.assertTrue(payload["reset_conversation"])
 
 
 if __name__ == "__main__":

@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">SmartCockpit voice assistant</title>
+  <desc id="desc">A communication microphone over a radar scope</desc>
+  <rect x="16" y="16" width="480" height="480" rx="108" fill="#122432" stroke="#486273" stroke-width="8"/>
+
+  <g fill="none" stroke="#38c6d9" stroke-linecap="round">
+    <circle cx="256" cy="258" r="174" stroke-width="4" opacity="0.18"/>
+    <circle cx="256" cy="258" r="126" stroke-width="4" opacity="0.27"/>
+    <circle cx="256" cy="258" r="78" stroke-width="4" opacity="0.38"/>
+    <path d="M256 72v372M70 258h372" stroke-width="3" opacity="0.23"/>
+    <path d="M108 143a174 174 0 0 1 54-43M404 143a174 174 0 0 0-54-43" stroke-width="13" opacity="0.82"/>
+  </g>
+
+  <g fill="none" stroke="#f0f5f5" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M188 237v31a68 68 0 0 0 136 0v-31" stroke-width="18"/>
+    <path d="M160 259v10a96 96 0 0 0 192 0v-10" stroke-width="14" opacity="0.92"/>
+    <path d="M256 365v48M211 413h90" stroke-width="18"/>
+  </g>
+
+  <rect x="207" y="126" width="98" height="174" rx="49" fill="#f0f5f5" stroke="#7ee0e8" stroke-width="8"/>
+  <path d="M256 146v112" stroke="#1a6877" stroke-width="12" stroke-linecap="round" opacity="0.72"/>
+
+  <g fill="none" stroke="#f3ae54" stroke-linecap="round">
+    <path d="M128 213c-18 18-28 39-31 63" stroke-width="10"/>
+    <path d="M384 213c18 18 28 39 31 63" stroke-width="10"/>
+  </g>
+  <circle cx="405" cy="107" r="13" fill="#f3ae54"/>
+  <circle cx="405" cy="107" r="23" fill="none" stroke="#f3ae54" stroke-width="4" opacity="0.35"/>
+</svg>

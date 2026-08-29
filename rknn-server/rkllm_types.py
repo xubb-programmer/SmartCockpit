@@ -1,7 +1,7 @@
 """
 RKLLM ctypes 共享类型定义
 ========================
-从 llm_server.py / vision_server.py / generate_prompt_cache.py 提取的公共类型，
+从 llm_server.py / generate_prompt_cache.py 提取的公共类型，
 保证三处代码使用统一的结构体定义和枚举值。
 
 所有 ctypes Structure 必须与 librkllmrt.so 的 C 头文件 rkllm.h 保持一致。
@@ -65,10 +65,8 @@ class RKLLMParam(ctypes.Structure):
         ("mirostat_tau",       ctypes.c_float),
         ("mirostat_eta",       ctypes.c_float),
         ("skip_special_token", ctypes.c_bool),
+        ("ignore_eos_token",   ctypes.c_bool),
         ("is_async",           ctypes.c_bool),
-        ("img_start",          ctypes.c_char_p),
-        ("img_end",            ctypes.c_char_p),
-        ("img_content",        ctypes.c_char_p),
         ("extend_param",       RKLLMExtendParam),
     ]
 
@@ -95,14 +93,38 @@ class RKLLMTokenInput(ctypes.Structure):
     ]
 
 
-class RKLLMMultiModalInput(ctypes.Structure):
+class RKLLMImageInput(ctypes.Structure):
     _fields_ = [
-        ("prompt",         ctypes.c_char_p),
         ("image_embed",    ctypes.POINTER(ctypes.c_float)),
         ("n_image_tokens", ctypes.c_size_t),
         ("n_image",        ctypes.c_size_t),
+        ("image_start",    ctypes.c_char_p),
+        ("image_end",      ctypes.c_char_p),
+        ("image_content",  ctypes.c_char_p),
         ("image_width",    ctypes.c_size_t),
         ("image_height",   ctypes.c_size_t),
+    ]
+
+
+class RKLLMVideoInput(ctypes.Structure):
+    _fields_ = [
+        ("video_embed",        ctypes.POINTER(ctypes.c_float)),
+        ("n_frame_tokens",     ctypes.c_size_t),
+        ("n_frame_per_video",  ctypes.c_size_t),
+        ("n_video",            ctypes.c_size_t),
+        ("video_start",        ctypes.c_char_p),
+        ("video_end",          ctypes.c_char_p),
+        ("video_content",      ctypes.c_char_p),
+        ("frame_width",        ctypes.c_size_t),
+        ("frame_height",       ctypes.c_size_t),
+    ]
+
+
+class RKLLMMultiModalInput(ctypes.Structure):
+    _fields_ = [
+        ("prompt", ctypes.c_char_p),
+        ("image",  RKLLMImageInput),
+        ("video",  RKLLMVideoInput),
     ]
 
 
@@ -139,12 +161,28 @@ class RKLLMPromptCacheParam(ctypes.Structure):
     ]
 
 
+class RKLLMSamplingParam(ctypes.Structure):
+    _fields_ = [
+        ("top_k",             ctypes.c_int32),
+        ("top_p",             ctypes.c_float),
+        ("temperature",       ctypes.c_float),
+        ("repeat_penalty",    ctypes.c_float),
+        ("frequency_penalty", ctypes.c_float),
+        ("presence_penalty",  ctypes.c_float),
+        ("mirostat",          ctypes.c_int32),
+        ("mirostat_tau",      ctypes.c_float),
+        ("mirostat_eta",      ctypes.c_float),
+    ]
+
+
 class RKLLMInferParam(ctypes.Structure):
     _fields_ = [
         ("mode",                ctypes.c_int),
         ("lora_params",         ctypes.POINTER(RKLLMLoraParam)),
         ("prompt_cache_params", ctypes.POINTER(RKLLMPromptCacheParam)),
+        ("sampling_params",     ctypes.POINTER(RKLLMSamplingParam)),
         ("keep_history",        ctypes.c_int),
+        ("max_new_tokens",      ctypes.c_int32),
     ]
 
 
@@ -191,12 +229,58 @@ RKLLM_Handle_t = ctypes.c_void_p
 
 # ── 回调函数类型 ─────────────────────────────────────────────────
 
-RKLLM_Callback_t = ctypes.CFUNCTYPE(
+LLMResultCallback = ctypes.CFUNCTYPE(
     ctypes.c_int,
     ctypes.POINTER(RKLLMResult),
     ctypes.c_void_p,
     ctypes.c_int,
 )
+
+LLMTokenizerCallback = ctypes.CFUNCTYPE(
+    ctypes.c_int,
+    ctypes.c_void_p,
+    ctypes.c_char_p,
+    ctypes.c_int32,
+    ctypes.POINTER(ctypes.c_int32),
+    ctypes.c_int32,
+)
+
+LLMGetEmbedCallback = ctypes.CFUNCTYPE(
+    ctypes.c_int,
+    ctypes.c_void_p,
+    ctypes.POINTER(ctypes.c_int32),
+    ctypes.c_uint64,
+    ctypes.c_void_p,
+    ctypes.c_uint64,
+)
+
+
+class RKLLMCallback(ctypes.Structure):
+    _fields_ = [
+        ("result_callback",    LLMResultCallback),
+        ("result_userdata",    ctypes.c_void_p),
+        ("tokenizer_callback", LLMTokenizerCallback),
+        ("tokenizer_userdata", ctypes.c_void_p),
+        ("embed_callback",     LLMGetEmbedCallback),
+        ("embed_userdata",     ctypes.c_void_p),
+    ]
+
+
+# Backward-compatible alias used by existing server files when defining the
+# Python callback. rkllm_init now receives RKLLMCallback, not this function
+# pointer directly.
+RKLLM_Callback_t = LLMResultCallback
+
+
+def make_rkllm_callback(result_callback, result_userdata=None):
+    callback = RKLLMCallback()
+    callback.result_callback = result_callback
+    callback.result_userdata = result_userdata
+    callback.tokenizer_callback = LLMTokenizerCallback()
+    callback.tokenizer_userdata = None
+    callback.embed_callback = LLMGetEmbedCallback()
+    callback.embed_userdata = None
+    return callback
 
 
 # ── 工具函数 ─────────────────────────────────────────────────────

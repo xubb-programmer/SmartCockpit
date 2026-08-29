@@ -62,8 +62,8 @@ log:
 
 # 使用完声音文件后删除文件(Delete the sound file when you are done using it)
 delete_audio: true
-# 没有语音输入多久后断开连接(秒)，默认2分钟，即120秒
-close_connection_no_voice_time: 120
+# 没有语音输入多久后断开连接(秒)，默认5分钟，即300秒
+close_connection_no_voice_time: 300
 # TTS请求超时时间(秒)
 tts_timeout: 10
 # 工具调用超时时间(秒)
@@ -86,9 +86,18 @@ enable_websocket_ping: false
 #   > 0: 使用固定延迟（毫秒）发送，例如: 60
 tts_audio_send_delay: 0
 
+# 板端扬声器与麦克风距离较近，默认使用半双工避免助手声音被再次识别。
+# 如使用耳机并确实需要打断播报，可将 allow_barge_in 改为 true。
+allow_barge_in: false
+# TTS结束后继续忽略麦克风的时间，用于吸收扬声器和房间混响尾音。
+echo_suppression_tail_ms: 800
+
 exit_commands:
   - "退出"
   - "关闭"
+  - "再见"
+  - "告别"
+  - "结束对话"
 
 voice_assistant:
   type: hello
@@ -213,12 +222,10 @@ prompt_template: agent-base-prompt.txt
 # 系统错误时的回复
 system_error_response: "主人，小智现在有点忙，我们稍后再试吧。"
 
-# 结束语prompt
+# 空闲超时结束语（直接播放，不请求大模型）
 end_prompt:
   enable: true # 是否开启结束语
-  # 结束语
-  prompt: |
-    请你以"时间过得真快"为开头，用富有感情、依依不舍的话来结束这场对话吧！
+  text: "再见，祝您生活愉快！"
 
 # 具体处理时选择的模块(The module selected for specific processing)
 selected_module:
@@ -414,14 +421,30 @@ ASR:
         target: 桅杆
         match_exact: false
         contexts: [停止, 驻车, 行车, 展开, 撤收, 升, 降, 单次, 调平, 侦察]
+      - source: 为肝
+        target: 桅杆
+        match_exact: false
+        contexts: [停止, 驻车, 行车, 展开, 撤收, 升, 降, 单次, 调平, 侦察, 一键]
+      - source: 唯甘
+        target: 桅杆
+        match_exact: false
+        contexts: [停止, 驻车, 行车, 展开, 撤收, 升, 降, 单次, 调平, 侦察, 一键]
+      - source: 围杆
+        target: 桅杆
+        match_exact: false
+        contexts: [停止, 驻车, 行车, 展开, 撤收, 升, 降, 单次, 调平, 侦察, 一键]
+      - source: 一箭
+        target: 一键
+        match_exact: false
+        contexts: [桅杆, 乙肝, 为甘, 为肝, 唯甘, 围杆, 展开, 撤收]
       - source: 单单单次
         target: 单次
         match_exact: false
-        contexts: [桅杆, 乙肝, 为甘, 调平, 吊瓶]
+        contexts: [桅杆, 乙肝, 为甘, 为肝, 唯甘, 围杆, 调平, 吊瓶]
       - source: 单单次
         target: 单次
         match_exact: false
-        contexts: [桅杆, 乙肝, 为甘, 调平, 吊瓶]
+        contexts: [桅杆, 乙肝, 为甘, 为肝, 唯甘, 围杆, 调平, 吊瓶]
       - source: 吊瓶
         target: 调平
         match_exact: false
@@ -434,6 +457,54 @@ ASR:
         target: 红外
         match_exact: false
         contexts: [上电, 下电, 打开, 关闭, 视场, 放大, 缩小, 聚焦, 调焦, 十字丝, 亮度, 增强, 极性, 对比度, 校正]
+      - source: 调焦家家
+        target: 调焦加
+        match_exact: false
+        contexts: [白光, 热像, 红外, 可见光, 相机, 摄像机]
+      - source: 调焦家加加
+        target: 调焦加
+        match_exact: false
+        contexts: [白光, 热像, 红外, 可见光, 相机, 摄像机]
+      - source: 调焦家加
+        target: 调焦加
+        match_exact: false
+        contexts: [白光, 热像, 红外, 可见光, 相机, 摄像机]
+      - source: 调焦加加
+        target: 调焦加
+        match_exact: false
+        contexts: [白光, 热像, 红外, 可见光, 相机, 摄像机]
+      - source: 调焦增加
+        target: 调焦加
+        match_exact: false
+        contexts: [白光, 热像, 红外, 可见光, 相机, 摄像机]
+      - source: 调焦茧
+        target: 调焦减
+        match_exact: false
+        contexts: [白光, 热像, 红外, 可见光, 相机, 摄像机]
+      - source: 调焦剪
+        target: 调焦减
+        match_exact: false
+        contexts: [白光, 热像, 红外, 可见光, 相机, 摄像机]
+      - source: 调焦键
+        target: 调焦减
+        match_exact: false
+        contexts: [白光, 热像, 红外, 可见光, 相机, 摄像机]
+      - source: 调焦检
+        target: 调焦减
+        match_exact: false
+        contexts: [白光, 热像, 红外, 可见光, 相机, 摄像机]
+      - source: 调焦件
+        target: 调焦减
+        match_exact: false
+        contexts: [白光, 热像, 红外, 可见光, 相机, 摄像机]
+      - source: 调焦见
+        target: 调焦减
+        match_exact: false
+        contexts: [白光, 热像, 红外, 可见光, 相机, 摄像机]
+      - source: 调焦减少
+        target: 调焦减
+        match_exact: false
+        contexts: [白光, 热像, 红外, 可见光, 相机, 摄像机]
   DoubaoASR:
     # 可以在这里申请相关Key等信息
     # https://console.volcengine.com/speech/app
@@ -629,7 +700,7 @@ VAD:
     threshold: 0.5
     threshold_low: 0.3
     model_dir: models/snakers4_silero-vad
-    min_silence_duration_ms: 200  # 如果说话停顿比较长，可以把这个值设置大一些
+    min_silence_duration_ms: 240  # 低延时与句尾完整性的折中值
 
 LLM:
   # 所有openai类型均可以修改超参，以AliLLM为例
@@ -642,7 +713,7 @@ LLM:
     model_name: qwen-flash
     api_key: 你的deepseek web key
     temperature: 0.7  # 温度值
-    max_tokens: 500   # 最大生成token数
+    max_tokens: 256   # 车载语音回复上限，避免小模型异常长输出
     top_p: 1
     frequency_penalty: 0  # 频率惩罚
   AliAppLLM:

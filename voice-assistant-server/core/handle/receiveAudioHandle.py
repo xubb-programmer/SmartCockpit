@@ -1,15 +1,16 @@
 import time
 import json
 import asyncio
+import uuid
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from core.connection import ConnectionHandler
 from core.utils.util import audio_to_data
 from core.handle.abortHandle import handleAbortMessage
-from core.handle.intentHandler import handle_user_intent
+from core.handle.intentHandler import handle_user_intent, speak_txt
 from core.utils.output_counter import check_device_output_limit
-from core.handle.sendAudioHandle import send_stt_message, SentenceType
+from core.handle.sendAudioHandle import send_stt_message, send_tts_message, SentenceType
 
 TAG = __name__
 
@@ -17,6 +18,26 @@ TAG = __name__
 async def handleAudioMessage(conn: "ConnectionHandler", audio):
     if conn.is_exiting:
         return
+
+    allow_barge_in = bool(conn.config.get("allow_barge_in", False))
+    suppressing_echo = (
+        conn.client_is_speaking
+        or time.monotonic() < getattr(conn, "ignore_audio_until", 0.0)
+    )
+    if suppressing_echo and not allow_barge_in:
+        conn.suppressed_audio_packets = getattr(conn, "suppressed_audio_packets", 0) + 1
+        if conn.suppressed_audio_packets == 1 or conn.suppressed_audio_packets % 500 == 0:
+            conn.logger.bind(tag=TAG).info(
+                f"[音频诊断][回声抑制] 已丢弃={conn.suppressed_audio_packets}帧"
+            )
+        return
+
+    if getattr(conn, "suppressed_audio_packets", 0):
+        conn.logger.bind(tag=TAG).info(
+            f"[音频诊断][回声抑制] 本轮共丢弃={conn.suppressed_audio_packets}帧，恢复收音"
+        )
+        conn.suppressed_audio_packets = 0
+
     # 当前片段是否有人说话
     have_voice = conn.vad.is_vad(conn, audio)
     # 如果设备刚刚被唤醒，短暂忽略VAD检测
@@ -28,6 +49,8 @@ async def handleAudioMessage(conn: "ConnectionHandler", audio):
         return
     # 设备长时间空闲检测，用于say goodbye
     await no_voice_close_connect(conn, have_voice)
+    if conn.is_exiting:
+        return
     # 接收音频
     await conn.asr.receive_audio(conn, audio, have_voice)
 
@@ -103,7 +126,7 @@ async def no_voice_close_connect(conn: "ConnectionHandler", have_voice):
     if conn.last_activity_time > 0.0:
         no_voice_time = time.time() * 1000 - conn.last_activity_time
         close_connection_no_voice_time = int(
-            conn.config.get("close_connection_no_voice_time", 120)
+            conn.config.get("close_connection_no_voice_time", 300)
         )
         if (
             not conn.close_after_chat
@@ -111,15 +134,21 @@ async def no_voice_close_connect(conn: "ConnectionHandler", have_voice):
         ):
             conn.close_after_chat = True
             conn.client_abort = False
+            conn.is_exiting = True
             end_prompt = conn.config.get("end_prompt", {})
             if end_prompt and end_prompt.get("enable", True) is False:
                 conn.logger.bind(tag=TAG).info("结束对话，无需发送结束提示语")
                 await conn.close()
                 return
-            prompt = end_prompt.get("prompt")
-            if not prompt:
-                prompt = "请你以```时间过得真快```为开头，用富有感情、依依不舍的话来结束这场对话吧！"
-            await startToChat(conn, prompt)
+            goodbye_text = end_prompt.get("text") or "再见，祝您生活愉快！"
+            conn.sentence_id = str(uuid.uuid4().hex)
+            conn.logger.bind(tag=TAG).info(
+                f"空闲超时，直接播放固定结束语: {goodbye_text}"
+            )
+            # 固定结束语是一个新的播报事件，不能沿用五分钟前上一轮对话的计时起点。
+            conn.current_turn_started_at = time.monotonic()
+            await send_tts_message(conn, "start")
+            speak_txt(conn, goodbye_text)
 
 
 async def max_out_size(conn: "ConnectionHandler"):

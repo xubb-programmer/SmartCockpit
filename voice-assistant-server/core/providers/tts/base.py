@@ -6,6 +6,7 @@ import asyncio
 import threading
 import traceback
 import concurrent.futures
+from websockets.exceptions import ConnectionClosed, ConnectionClosedOK
 
 from core.utils import p3
 from datetime import datetime
@@ -25,6 +26,7 @@ from core.providers.tts.dto.dto import (
     ContentType,
     InterfaceType,
 )
+from core.providers.tts.segmenter import normalize_tts_punctuation, take_segment
 
 TAG = __name__
 logger = setup_logging()
@@ -38,6 +40,7 @@ class TTSProviderBase(ABC):
         self.audio_file_type = "wav"
         self.output_file = config.get("output_dir", "tmp/")
         self.tts_timeout = int(config.get("tts_timeout", 15))
+        self.max_segment_chars = max(12, int(config.get("max_segment_chars", 36)))
         self.tts_text_queue = queue.Queue()
         self.tts_audio_queue = queue.Queue()
         self.tts_audio_first_sentence = True
@@ -416,6 +419,12 @@ class TTSProviderBase(ABC):
                 if self.conn.max_output_size > 0 and text:
                     add_device_output(self.conn.headers.get("device-id"), len(text))
 
+            except ConnectionClosedOK:
+                logger.bind(tag=TAG).info("客户端正常关闭，停止下行音频线程")
+                break
+            except ConnectionClosed as e:
+                logger.bind(tag=TAG).warning(f"客户端连接已关闭，停止下行音频线程: {e}")
+                break
             except Exception as e:
                 logger.bind(tag=TAG).error(f"audio_play_priority_thread: {text} {e}")
 
@@ -435,44 +444,43 @@ class TTSProviderBase(ABC):
         # 合并当前全部文本并处理未分割部分
         full_text = "".join(self.tts_text_buff)
         current_text = full_text[self.processed_chars :]  # 从未处理的位置开始
-        last_punct_pos = -1
-
         # 根据是否是第一句话选择不同的标点符号集合
         punctuations_to_use = (
             self.first_sentence_punctuations
             if self.is_first_sentence
             else self.punctuations
         )
-
-        for punct in punctuations_to_use:
-            pos = current_text.rfind(punct)
-            if (pos != -1 and last_punct_pos == -1) or (
-                pos != -1 and pos < last_punct_pos
-            ):
-                last_punct_pos = pos
-
-        if last_punct_pos != -1:
-            segment_text_raw = current_text[: last_punct_pos + 1]
-            segment_text = self._prepare_segment_for_tts(segment_text_raw)
-            self.processed_chars += len(segment_text_raw)  # 更新已处理字符位置
-
-            # 如果是第一句话，在找到第一个逗号后，将标志设置为False
-            if self.is_first_sentence:
-                self.is_first_sentence = False
-
-            return segment_text
-        elif self.tts_stop_request and current_text:
-            segment_text = self._prepare_segment_for_tts(
-                current_text, ensure_sentence_end=True
-            )
-            self.is_first_sentence = True  # 重置标志
-            return segment_text
-        else:
+        segment_text_raw = self._take_segment(
+            current_text,
+            punctuations_to_use,
+            force=self.tts_stop_request,
+        )
+        if segment_text_raw is None:
             return None
+
+        has_boundary = segment_text_raw.endswith(punctuations_to_use)
+        segment_text = self._prepare_segment_for_tts(
+            segment_text_raw,
+            ensure_sentence_end=not has_boundary,
+        )
+        self.processed_chars += len(segment_text_raw)
+        self.is_first_sentence = False
+        return segment_text
+
+    def _take_segment(self, text, punctuations, force=False):
+        """按最早标点或硬字符上限切出一段，避免长文本阻塞离线TTS。"""
+        return take_segment(
+            text,
+            punctuations,
+            self.max_segment_chars,
+            force=force,
+        )
 
     def _prepare_segment_for_tts(self, text, ensure_sentence_end=False):
         """清理TTS文本，同时保留控制停顿所需的句末标点。"""
-        cleaned_text = MarkdownCleaner.clean_markdown(text).strip()
+        cleaned_text = normalize_tts_punctuation(
+            MarkdownCleaner.clean_markdown(text)
+        ).strip()
         if not textUtils.get_string_no_punctuation_or_emoji(cleaned_text):
             return ""
 
@@ -520,16 +528,25 @@ class TTSProviderBase(ABC):
             bool: 是否成功处理了文本
         """
         full_text = "".join(self.tts_text_buff)
-        remaining_text = full_text[self.processed_chars :]
-        if remaining_text:
-            segment_text = self._prepare_segment_for_tts(
-                remaining_text, ensure_sentence_end=True
+        processed_any = False
+        while self.processed_chars < len(full_text):
+            remaining_text = full_text[self.processed_chars :]
+            segment_text_raw = self._take_segment(
+                remaining_text,
+                self.punctuations,
+                force=True,
             )
+            if not segment_text_raw:
+                break
+            segment_text = self._prepare_segment_for_tts(
+                segment_text_raw,
+                ensure_sentence_end=not segment_text_raw.endswith(self.punctuations),
+            )
+            self.processed_chars += len(segment_text_raw)
             if segment_text:
                 self.to_tts_stream(segment_text, opus_handler=opus_handler)
-                self.processed_chars = len(full_text)
-                return True
-        return False
+                processed_any = True
+        return processed_any
 
     def _apply_percentage_params(self, config):
         """根据子类定义的 TTS_PARAM_CONFIG 批量应用百分比参数"""

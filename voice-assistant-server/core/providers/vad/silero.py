@@ -5,6 +5,7 @@ import opuslib_next
 import onnxruntime
 from config.logger import setup_logging
 from core.providers.vad.base import VADProviderBase
+from core.utils.npu_priority import signal_text_priority
 
 TAG = __name__
 logger = setup_logging()
@@ -126,7 +127,18 @@ class VADProvider(VADProviderBase):
                     stop_duration = time.time() * 1000 - conn.vad_last_voice_time
                     if stop_duration >= self.silence_threshold_ms:
                         conn.client_voice_stop = True
+                        now = time.monotonic()
+                        conn.current_vad_completed_at = now
+                        conn.current_speech_ended_at = now - stop_duration / 1000.0
                 if client_have_voice:
+                    if not conn.client_have_voice:
+                        conn.current_speech_started_at = time.monotonic()
+                        conn.current_speech_ended_at = None
+                        conn.current_vad_completed_at = None
+                        signal_text_priority(
+                            getattr(conn, "session_id", "voice"),
+                            ttl_seconds=4.0,
+                        )
                     conn.client_have_voice = True
                     conn.vad_last_voice_time = time.time() * 1000
 

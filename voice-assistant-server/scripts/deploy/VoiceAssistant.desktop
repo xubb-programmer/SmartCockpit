@@ -1,0 +1,14 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Voice Assistant
+Name[zh_CN]=语音助手服务
+Comment=Open SmartCockpit Web UI after the backend is ready
+Comment[zh_CN]=后台语音服务就绪后打开 Web 客户端
+Exec=/opt/jw/voice-assistant-server/scripts/deploy/voice-assistant.sh desktop
+Icon=/opt/jw/voice-assistant-server/web/voice-assistant-icon.svg
+Path=/opt/jw/voice-assistant-server/scripts/deploy
+Terminal=false
+Categories=Network;AudioVideo;
+StartupNotify=true
+Keywords=voice;assistant;rkllm;

@@ -85,11 +85,14 @@ async def main():
             get_local_ip(),
             port,
         )
-    logger.bind(tag=TAG).info(
-        "视觉分析内部HTTP接口是\thttp://{}:{}/mcp/vision/explain",
-        get_local_ip(),
-        port,
-    )
+    if (config.get("runtime_capabilities") or {}).get("vision_enabled", False):
+        logger.bind(tag=TAG).info(
+            "视觉分析内部HTTP接口是\thttp://{}:{}/mcp/vision/explain",
+            get_local_ip(),
+            port,
+        )
+    else:
+        logger.bind(tag=TAG).info("视觉分析功能未启用，未向模型注册视觉工具")
     mcp_endpoint = config.get("mcp_endpoint", None)
     if mcp_endpoint is not None and "你" not in mcp_endpoint:
         # 校验MCP接入点格式
@@ -122,7 +125,7 @@ async def main():
         web_http_port,
     )
     logger.bind(tag=TAG).info(
-        "Web客户端远程安全入口(由deploy/start.sh启动): https://{}:{}/",
+        "Web客户端远程安全入口(由deploy/voice-assistant.sh启动): https://{}:{}/",
         get_local_ip(),
         web_https_port,
     )

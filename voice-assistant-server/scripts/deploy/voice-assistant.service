@@ -10,8 +10,9 @@ Group=ztl
 WorkingDirectory=/opt/jw/voice-assistant-server/scripts/deploy
 Environment=HOME=/home/ztl
 Environment=USER=ztl
+Environment=VOICE_ASSISTANT_MODEL=qwen3-4b
 ExecStartPre=/bin/bash -c 'for i in {1..60}; do ip -4 address show scope global | grep -q "inet " && exit 0; sleep 1; done; exit 1'
-ExecStart=/opt/jw/voice-assistant-server/scripts/deploy/voice-assistant.sh start --no-vision --no-follow
+ExecStart=/opt/jw/voice-assistant-server/scripts/deploy/voice-assistant.sh start --no-follow
 ExecStop=/opt/jw/voice-assistant-server/scripts/deploy/voice-assistant.sh stop
 RemainAfterExit=yes
 TimeoutStartSec=240

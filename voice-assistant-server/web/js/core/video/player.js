@@ -189,7 +189,12 @@ export class VideoStreamPlayer {
                 this.fail('视频网关返回了无效数据');
                 return;
             }
-            if (message.type === 'stream-started') {
+            if (message.type === 'reconnecting') {
+                this.setStatus(
+                    'reconnecting',
+                    `视频源断开，正在重连 (${message.attempt}/${message.maxAttempts})...`,
+                );
+            } else if (message.type === 'stream-started' || message.type === 'stream-reconnected') {
                 this.onStreamInfo?.(message);
                 this.createMedia(message.codec, connectionId);
             } else if (message.type === 'error') {

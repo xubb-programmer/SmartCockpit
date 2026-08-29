@@ -195,16 +195,40 @@ class SherpaAsrConfigTests(unittest.TestCase):
                     "contexts": ["停止", "单次", "调平"],
                 },
                 {
+                    "source": "为肝",
+                    "target": "桅杆",
+                    "match_exact": False,
+                    "contexts": ["停止", "单次", "调平", "一键", "展开"],
+                },
+                {
+                    "source": "唯甘",
+                    "target": "桅杆",
+                    "match_exact": False,
+                    "contexts": ["停止", "单次", "调平", "一键", "展开"],
+                },
+                {
+                    "source": "围杆",
+                    "target": "桅杆",
+                    "match_exact": False,
+                    "contexts": ["停止", "单次", "调平", "一键", "展开"],
+                },
+                {
+                    "source": "一箭",
+                    "target": "一键",
+                    "match_exact": False,
+                    "contexts": ["桅杆", "为肝", "唯甘", "围杆", "展开", "撤收"],
+                },
+                {
                     "source": "单单单次",
                     "target": "单次",
                     "match_exact": False,
-                    "contexts": ["桅杆", "吊瓶"],
+                    "contexts": ["桅杆", "吊瓶", "为肝", "唯甘", "围杆"],
                 },
                 {
                     "source": "单单次",
                     "target": "单次",
                     "match_exact": False,
-                    "contexts": ["桅杆", "吊瓶"],
+                    "contexts": ["桅杆", "吊瓶", "为肝", "唯甘", "围杆"],
                 },
                 {
                     "source": "吊瓶",
@@ -223,6 +247,78 @@ class SherpaAsrConfigTests(unittest.TestCase):
                     "target": "红外",
                     "match_exact": False,
                     "contexts": ["上电", "下电", "打开", "关闭", "视场"],
+                },
+                {
+                    "source": "调焦家家",
+                    "target": "调焦加",
+                    "match_exact": False,
+                    "contexts": ["白光", "热像", "红外"],
+                },
+                {
+                    "source": "调焦家加加",
+                    "target": "调焦加",
+                    "match_exact": False,
+                    "contexts": ["白光", "热像", "红外"],
+                },
+                {
+                    "source": "调焦家加",
+                    "target": "调焦加",
+                    "match_exact": False,
+                    "contexts": ["白光", "热像", "红外"],
+                },
+                {
+                    "source": "调焦加加",
+                    "target": "调焦加",
+                    "match_exact": False,
+                    "contexts": ["白光", "热像", "红外"],
+                },
+                {
+                    "source": "调焦增加",
+                    "target": "调焦加",
+                    "match_exact": False,
+                    "contexts": ["白光", "热像", "红外"],
+                },
+                {
+                    "source": "调焦茧",
+                    "target": "调焦减",
+                    "match_exact": False,
+                    "contexts": ["白光", "热像", "红外"],
+                },
+                {
+                    "source": "调焦剪",
+                    "target": "调焦减",
+                    "match_exact": False,
+                    "contexts": ["白光", "热像", "红外"],
+                },
+                {
+                    "source": "调焦键",
+                    "target": "调焦减",
+                    "match_exact": False,
+                    "contexts": ["白光", "热像", "红外"],
+                },
+                {
+                    "source": "调焦检",
+                    "target": "调焦减",
+                    "match_exact": False,
+                    "contexts": ["白光", "热像", "红外"],
+                },
+                {
+                    "source": "调焦件",
+                    "target": "调焦减",
+                    "match_exact": False,
+                    "contexts": ["白光", "热像", "红外"],
+                },
+                {
+                    "source": "调焦见",
+                    "target": "调焦减",
+                    "match_exact": False,
+                    "contexts": ["白光", "热像", "红外"],
+                },
+                {
+                    "source": "调焦减少",
+                    "target": "调焦减",
+                    "match_exact": False,
+                    "contexts": ["白光", "热像", "红外"],
                 },
             ],
         }
@@ -253,6 +349,15 @@ class SherpaAsrConfigTests(unittest.TestCase):
             provider._apply_text_corrections("乙肝停止"), "桅杆停止"
         )
         self.assertEqual(
+            provider._apply_text_corrections("为肝一键展开"), "桅杆一键展开"
+        )
+        self.assertEqual(
+            provider._apply_text_corrections("唯甘一箭展开"), "桅杆一键展开"
+        )
+        self.assertEqual(
+            provider._apply_text_corrections("围杆一箭展开"), "桅杆一键展开"
+        )
+        self.assertEqual(
             provider._apply_text_corrections("乙肝单单单次吊瓶"),
             "桅杆单次调平",
         )
@@ -265,6 +370,10 @@ class SherpaAsrConfigTests(unittest.TestCase):
         )
         self.assertEqual(
             provider._apply_text_corrections("我今天要打吊瓶"), "我今天要打吊瓶"
+        )
+        self.assertEqual(
+            provider._apply_text_corrections("我去医院检查为肝"),
+            "我去医院检查为肝",
         )
         self.assertEqual(
             provider._apply_text_corrections("白光上殿红外上殿"),
@@ -280,6 +389,46 @@ class SherpaAsrConfigTests(unittest.TestCase):
         self.assertEqual(
             provider._apply_text_corrections("他们两个求同存异"),
             "他们两个求同存异",
+        )
+        self.assertEqual(
+            provider._apply_text_corrections("白光调焦家家"), "白光调焦加"
+        )
+        self.assertEqual(
+            provider._apply_text_corrections("白光调焦家加加"), "白光调焦加"
+        )
+        self.assertEqual(
+            provider._apply_text_corrections("白光调焦家加"), "白光调焦加"
+        )
+        self.assertEqual(
+            provider._apply_text_corrections("热像调焦加加"), "热像调焦加"
+        )
+        self.assertEqual(
+            provider._apply_text_corrections("白光调焦增加"), "白光调焦加"
+        )
+        self.assertEqual(
+            provider._apply_text_corrections("热像调焦茧"), "热像调焦减"
+        )
+        self.assertEqual(
+            provider._apply_text_corrections("白光调焦剪"), "白光调焦减"
+        )
+        self.assertEqual(
+            provider._apply_text_corrections("白光调焦键"), "白光调焦减"
+        )
+        self.assertEqual(
+            provider._apply_text_corrections("白光调焦检"), "白光调焦减"
+        )
+        self.assertEqual(
+            provider._apply_text_corrections("热像调焦件"), "热像调焦减"
+        )
+        self.assertEqual(
+            provider._apply_text_corrections("红外调焦见"), "红外调焦减"
+        )
+        self.assertEqual(
+            provider._apply_text_corrections("白光调焦减少"), "白光调焦减"
+        )
+        self.assertEqual(
+            provider._apply_text_corrections("我家家人增加了"),
+            "我家家人增加了",
         )
 
 
