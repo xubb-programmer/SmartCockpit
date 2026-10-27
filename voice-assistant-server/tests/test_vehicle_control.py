@@ -58,8 +58,12 @@ class FakeConnection:
             "vehicle_id": "z1_001",
             "vehicle_control": {
                 "all_targets": {
-                    "enable": ["vis_cam", "ir_cam", "gimbal", "laser"],
-                    "disable": ["vis_cam", "ir_cam", "gimbal", "laser"],
+                    "enable": [
+                        "vis_cam", "ir_cam", "gimbal", "laser",
+                    ],
+                    "disable": [
+                        "vis_cam", "ir_cam", "gimbal", "laser",
+                    ],
                 },
                 "param_rules": {
                     "digital_zoom": {
@@ -70,7 +74,10 @@ class FakeConnection:
                     },
                     "scan_circle": {
                         "direction": {"allowed": ["cw", "ccw"]},
-                        "count": {"integer": True, "min": 1, "max": 99},
+                    },
+                    "digital_guide": {
+                        "azimuth": {"number": True, "required": True},
+                        "pitch": {"number": True, "required": True},
                     },
                 },
                 "devices": {
@@ -92,7 +99,7 @@ class FakeConnection:
                         "cn_names": ["稳台"],
                         "actions": [
                             "enable", "disable", "zero_return",
-                            "scan_circle", "scan_stop",
+                            "scan_circle", "digital_guide", "scan_stop",
                         ],
                     },
                     "laser": {
@@ -197,7 +204,9 @@ class VehicleControlTests(unittest.TestCase):
 
     def test_full_inventory_is_treated_as_logical_all_group(self):
         result, calls = self.execute(
-            ["vis_cam", "ir_cam", "gimbal", "laser", "tracker", "mast"],
+            [
+                "vis_cam", "ir_cam", "gimbal", "laser", "tracker", "mast",
+            ],
             "disable",
         )
 
@@ -317,21 +326,45 @@ class VehicleControlTests(unittest.TestCase):
         result, calls = self.execute(
             "gimbal",
             "scan_circle",
-            {"direction": "cw", "count": "三"},
+            {"direction": "cw"},
             query="开始扫描",
         )
 
         self.assertEqual(
             calls,
-            [("gimbal", "scan_circle", {"direction": "cw", "count": "3"})],
+            [("gimbal", "scan_circle", {"direction": "cw"})],
         )
         self.assertEqual(
             json.loads(result.result)["params"],
-            {"direction": "cw", "count": "3"},
+            {"direction": "cw"},
         )
 
-        for params in ({"direction": "left"}, {"count": "100"}):
+        for params in ({"direction": "left"}, {"count": "3"}):
             result, calls = self.execute("gimbal", "scan_circle", params)
+            self.assertEqual(calls, [])
+            self.assertEqual(
+                json.loads(result.result)["error"], "control_params_invalid"
+            )
+
+    def test_digital_guide_requires_numeric_azimuth_and_pitch(self):
+        result, calls = self.execute(
+            "gimbal",
+            "digital_guide",
+            {"azimuth": "82.67度", "pitch": "-10.5"},
+            query="稳台转到方位八十二点六七度俯仰负十点五度",
+        )
+
+        expected_params = {"azimuth": 82.67, "pitch": -10.5}
+        self.assertEqual(calls, [("gimbal", "digital_guide", expected_params)])
+        self.assertEqual(json.loads(result.result)["params"], expected_params)
+
+        for params in (
+            {"azimuth": "82.67"},
+            {"azimuth": "nan", "pitch": "10.5"},
+            {"azimuth": "82.67", "pitch": "infinity"},
+            {"azimuth": True, "pitch": "10.5"},
+        ):
+            result, calls = self.execute("gimbal", "digital_guide", params)
             self.assertEqual(calls, [])
             self.assertEqual(
                 json.loads(result.result)["error"], "control_params_invalid"

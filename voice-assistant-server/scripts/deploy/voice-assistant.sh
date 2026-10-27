@@ -34,6 +34,7 @@ VOICE_ASSISTANT_WS_PORT=18000
 VOICE_ASSISTANT_HTTP_PORT=18003
 WEB_HTTP_PORT=18006
 WEB_HTTPS_PORT=18007
+DOWNLOAD_DIR="${DOWNLOAD_DIR:-${HOME_DIR}/downloads}"
 
 VISION_RKNN_MODEL="${VISION_RKNN_MODEL:-}"
 # 视觉播报限定为短句，减少 0.8B 多模态生成尾延时；可用环境变量覆盖。
@@ -53,13 +54,18 @@ LEGACY_VISION_RKLLM_PID_FILE="/tmp/rkllm_vision_server.pid"
 VOICE_ASSISTANT_PID_FILE="/tmp/voice_assistant_server.pid"
 WEB_HTTP_PID_FILE="/tmp/web_http_server.pid"
 WEB_HTTPS_PID_FILE="/tmp/web_https_server.pid"
+HEADLESS_VOICE_PID_FILE="/tmp/headless_voice_client.pid"
 RKLLM_LOG="/tmp/rkllm_server.log"
 VOICE_ASSISTANT_LOG="/tmp/voice_assistant_server.log"
 WEB_HTTP_LOG="/tmp/web_http_server.log"
 WEB_HTTPS_LOG="/tmp/web_https_server.log"
+HEADLESS_VOICE_LOG="/tmp/headless_voice_client.log"
 START_LOCK_FILE="/tmp/voice_assistant_start.lock"
+ACCESS_MODE_FILE="/tmp/voice_assistant_access_mode"
+HEADLESS_VOICE_CLIENT="${VOICE_ASSISTANT_DIR}/clients/headless_voice_client.py"
+ACTIVE_ACCESS_MODE="web"
 
-WEB_URL="https://127.0.0.1:${WEB_HTTPS_PORT}/"
+WEB_URL="https://127.0.0.1:${WEB_HTTPS_PORT}/?v=0903a"
 
 GREEN='\033[0;32m'; YELLOW='\033[1;33m'; RED='\033[0;31m'; CYAN='\033[0;36m'; NC='\033[0m'
 info()    { echo -e "${GREEN}[INFO ]${NC} $*"; }
@@ -75,6 +81,29 @@ wait_for_port() {
         printf "."
     done
     echo; return 1
+}
+
+prepare_download_dir() {
+    local requested="${DOWNLOAD_DIR}"
+    local fallback="${VOICE_ASSISTANT_DIR}/downloads"
+
+    if mkdir -p "${requested}" 2>/dev/null; then
+        return 0
+    fi
+
+    if [[ "${requested}" == "${HOME_DIR}/downloads" ]] \
+        && command -v sudo >/dev/null 2>&1 \
+        && sudo -n install -d -m 0755 -o "$(id -un)" -g "$(id -gn)" "${requested}" 2>/dev/null; then
+        info "已创建文件下载目录: ${requested}"
+        return 0
+    fi
+
+    warn "无法创建文件下载目录 ${requested}，改用 ${fallback}"
+    if ! mkdir -p "${fallback}"; then
+        error "无法创建备用文件下载目录: ${fallback}"
+        return 1
+    fi
+    DOWNLOAD_DIR="${fallback}"
 }
 
 is_running() { [ -f "$1" ] && kill -0 "$(cat "$1")" 2>/dev/null; }
@@ -258,7 +287,11 @@ print_summary() {
     echo -e "  ${GREEN}voice-assistant-server${NC}  PID=$(cat ${VOICE_ASSISTANT_PID_FILE} 2>/dev/null)  日志: ${VOICE_ASSISTANT_LOG}"
     echo -e "  ${GREEN}Web HTTP${NC}       PID=$(cat ${WEB_HTTP_PID_FILE} 2>/dev/null)  日志: ${WEB_HTTP_LOG}"
     echo -e "  ${GREEN}Web HTTPS/WSS${NC}  PID=$(cat ${WEB_HTTPS_PID_FILE} 2>/dev/null)  日志: ${WEB_HTTPS_LOG}"
+    if [[ "${ACTIVE_ACCESS_MODE}" == "wakeup" || "${ACTIVE_ACCESS_MODE}" == "hybrid" ]]; then
+        echo -e "  ${GREEN}板端唤醒客户端${NC} PID=$(cat ${HEADLESS_VOICE_PID_FILE} 2>/dev/null)  日志: ${HEADLESS_VOICE_LOG}"
+    fi
     echo
+    echo -e "  语音入口 : ${CYAN}${ACTIVE_ACCESS_MODE}${NC}"
     echo -e "  RKLLM API : ${CYAN}http://${LOCAL_IP}:${RKLLM_PORT}/rkllm_chat${NC}"
     if rkllm_vision_enabled; then
         echo -e "  Vision API: ${CYAN}http://${LOCAL_IP}:${RKLLM_PORT}/vision/analyze${NC}  ${YELLOW}(同一多模态实例)${NC}"
@@ -270,6 +303,10 @@ print_summary() {
     echo
     echo -e "  ${YELLOW}[远程 HTTPS]${NC}"
     echo -e "    页面: ${CYAN}https://${LOCAL_IP}:${WEB_HTTPS_PORT}/${NC}"
+    echo
+    echo -e "  ${YELLOW}[文件下载（兼容 Windows XP）]${NC}"
+    echo -e "    地址: ${CYAN}http://${LOCAL_IP}:${WEB_HTTP_PORT}/download/${NC}"
+    echo -e "    目录: ${DOWNLOAD_DIR}"
     echo
 }
 
@@ -288,6 +325,14 @@ do_status() {
             echo -e "  ${RED}○${NC} ${name}  未运行"
         fi
     done
+    ACTIVE_ACCESS_MODE="$(cat "${ACCESS_MODE_FILE}" 2>/dev/null || echo web)"
+    if [[ "${ACTIVE_ACCESS_MODE}" == "wakeup" || "${ACTIVE_ACCESS_MODE}" == "hybrid" ]]; then
+        if is_running "${HEADLESS_VOICE_PID_FILE}"; then
+            echo -e "  ${GREEN}●${NC} 板端唤醒客户端  PID=$(cat "${HEADLESS_VOICE_PID_FILE}")"
+        else
+            echo -e "  ${RED}○${NC} 板端唤醒客户端  未运行"
+        fi
+    fi
     if rkllm_vision_enabled; then
         echo -e "  ${GREEN}●${NC} 视觉分析  与 RKLLM 共用 port=${RKLLM_PORT}"
     else
@@ -298,6 +343,9 @@ do_status() {
 }
 
 do_stop() {
+    section "停止板端唤醒客户端"
+    stop_process "板端唤醒客户端" "${HEADLESS_VOICE_PID_FILE}" 5 3 "clients/headless_voice_client.py"
+
     section "停止 voice-assistant-server"
     stop_process "voice-assistant-server" "${VOICE_ASSISTANT_PID_FILE}" 10 5 "app.py"
 
@@ -372,10 +420,21 @@ do_stop() {
     fi
 
     info "✓ 所有服务已停止"
+    rm -f "${ACCESS_MODE_FILE}"
+}
+
+read_access_mode() {
+    local mode
+    [ -f "${HEADLESS_VOICE_CLIENT}" ] || { echo "web"; return 0; }
+    mode="$(python3 "${HEADLESS_VOICE_CLIENT}" --print-mode 2>/dev/null | tail -n 1)"
+    case "${mode}" in
+        web|wakeup|hybrid) echo "${mode}" ;;
+        *) echo "web" ;;
+    esac
 }
 
 selected_model_from_args() {
-    local selected="${VOICE_ASSISTANT_MODEL:-qwen3.5-0.8b}"
+    local selected="${VOICE_ASSISTANT_MODEL:-qwen3-4b}"
     local arg
     for arg in "$@"; do
         case "${arg}" in
@@ -406,7 +465,7 @@ validate_start_request() {
 do_start() {
     local FOLLOW_LOGS=true
     local OPEN_BROWSER=false
-    local MODEL_SIZE="${VOICE_ASSISTANT_MODEL:-qwen3.5-0.8b}"
+    local MODEL_SIZE="${VOICE_ASSISTANT_MODEL:-qwen3-4b}"
     local ENABLE_VISION=false
 
     for arg in "$@"; do
@@ -442,6 +501,7 @@ do_start() {
     clear_stale_pid "${VOICE_ASSISTANT_PID_FILE}"
     clear_stale_pid "${WEB_HTTP_PID_FILE}"
     clear_stale_pid "${WEB_HTTPS_PID_FILE}"
+    clear_stale_pid "${HEADLESS_VOICE_PID_FILE}"
 
     section "初始 conda 环境: ${CONDA_ENV}"
     CONDA_BASE=$(conda info --base 2>/dev/null || echo "")
@@ -456,6 +516,16 @@ do_start() {
     source "${CONDA_BASE}/etc/profile.d/conda.sh"
     conda activate "${CONDA_ENV}"
     info "conda 环境已激活: ${CONDA_ENV}"
+
+    ACTIVE_ACCESS_MODE="$(read_access_mode)"
+    printf '%s\n' "${ACTIVE_ACCESS_MODE}" > "${ACCESS_MODE_FILE}"
+    info "语音入口模式: ${ACTIVE_ACCESS_MODE}"
+    if [[ "${ACTIVE_ACCESS_MODE}" == "wakeup" || "${ACTIVE_ACCESS_MODE}" == "hybrid" ]]; then
+        if ! python3 "${HEADLESS_VOICE_CLIENT}" --check; then
+            error "板端唤醒客户端预检失败，请检查KWS模型和音频设备"
+            exit 1
+        fi
+    fi
 
     if [ -f /etc/ssl/openssl.cnf ]; then
         export OPENSSL_CONF=/etc/ssl/openssl.cnf
@@ -630,6 +700,7 @@ do_start() {
 
     section "启动 Web 客户端服务（HTTP + HTTPS/WSS）"
     TEST_DIR="${VOICE_ASSISTANT_DIR}/web"
+    prepare_download_dir || exit 1
 
     if is_running "${WEB_HTTP_PID_FILE}"; then
         warn "Web HTTP 服务已在运行 (PID=$(cat ${WEB_HTTP_PID_FILE}))"
@@ -641,7 +712,8 @@ do_start() {
             start_detached "${WEB_HTTP_LOG}" "${WEB_HTTP_PID_FILE}" \
                 python3 "${HTTP_SCRIPT}" \
                 --port "${WEB_HTTP_PORT}" \
-                --web-dir "${TEST_DIR}"
+                --web-dir "${TEST_DIR}" \
+                --download-dir "${DOWNLOAD_DIR}"
             printf "  HTTP 启动中..."
             if wait_for_port "${WEB_HTTP_PORT}" 10; then
                 info "Web HTTP 服务就绪 (端口 ${WEB_HTTP_PORT})"
@@ -675,6 +747,26 @@ do_start() {
         fi
     fi
 
+    if [[ "${ACTIVE_ACCESS_MODE}" == "wakeup" || "${ACTIVE_ACCESS_MODE}" == "hybrid" ]]; then
+        section "启动板端唤醒词客户端"
+        if is_running "${HEADLESS_VOICE_PID_FILE}"; then
+            warn "板端唤醒客户端已在运行 (PID=$(cat ${HEADLESS_VOICE_PID_FILE}))"
+        else
+            start_detached "${HEADLESS_VOICE_LOG}" "${HEADLESS_VOICE_PID_FILE}" \
+                python3 "${HEADLESS_VOICE_CLIENT}"
+            sleep 2
+            if is_running "${HEADLESS_VOICE_PID_FILE}"; then
+                info "板端唤醒客户端已启动，等待唤醒词：你好小江"
+            else
+                error "板端唤醒客户端启动失败，查看日志：${HEADLESS_VOICE_LOG}"
+                tail -20 "${HEADLESS_VOICE_LOG}" || true
+                exit 1
+            fi
+        fi
+    else
+        info "web 模式不启动板端唤醒客户端"
+    fi
+
     print_summary
 
     if [[ "${OPEN_BROWSER}" == "true" ]]; then
@@ -689,7 +781,7 @@ do_start() {
         info "停止服务请运行: $0 stop"
         info "正在显示实时日志（Ctrl+C 仅退出日志，服务不会停止）"
         echo -e "${CYAN}────────────────────── 实时日志 ──────────────────────${NC}"
-        tail -f "${RKLLM_LOG}" "${VOICE_ASSISTANT_LOG}" "${WEB_HTTPS_LOG}" 2>/dev/null || true
+        tail -f "${RKLLM_LOG}" "${VOICE_ASSISTANT_LOG}" "${WEB_HTTPS_LOG}" "${HEADLESS_VOICE_LOG}" 2>/dev/null || true
         echo
         info "已退出实时日志，服务仍在后台运行"
         info "再次查看日志请运行 ./logs.sh"
@@ -711,10 +803,14 @@ usage() {
   desktop   检查后台服务就绪后打开浏览器（不启动后端）
 
 启动选项:
-  qwen3.5 | qwen3.5-2b | 3b | 7b | qwen3-1.7b | qwen3-4b
+  qwen3.5 | qwen3.5-2b | 3b | 7b | qwen3-1.7b | qwen3-4b（默认）
   --vision      为 Qwen3.5 加载配套视觉编码器（纯文本模型不支持）
   --no-follow
   --open-browser
+
+语音入口模式:
+  在 data/.config.yaml 设置 voice_access.mode: web | wakeup | hybrid
+  默认 web；wakeup/hybrid 会启动板端“你好小江”唤醒客户端
 
 示例:
   $0 start

@@ -2,7 +2,7 @@
 import { loadConfig, saveConfig } from '../config/manager.js';
 import { getAudioPlayer } from '../core/audio/player.js';
 import { getAudioRecorder } from '../core/audio/recorder.js';
-import { getWebSocketHandler } from '../core/network/websocket.js';
+import { getWebSocketHandler } from '../core/network/websocket.js?v=0903a';
 
 // UI controller class
 class UIController {
@@ -423,7 +423,7 @@ class UIController {
     }
 
     // Start AI chat session after connection
-    startAIChatSession() {
+    startAIChatSession({ autoStartRecording = true } = {}) {
         this.addChatMessage('连接成功，开始聊天吧~😊', false);
         // Check microphone availability and show error messages if needed
         if (!window.microphoneAvailable) {
@@ -434,7 +434,7 @@ class UIController {
             }
         }
         // Start recording only if microphone is available
-        if (window.microphoneAvailable) {
+        if (window.microphoneAvailable && autoStartRecording) {
             const recordBtn = document.getElementById('recordBtn');
             if (recordBtn) {
                 recordBtn.click();

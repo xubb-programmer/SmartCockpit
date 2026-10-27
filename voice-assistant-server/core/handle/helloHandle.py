@@ -20,15 +20,7 @@ TAG = __name__
 WAKEUP_CONFIG = {
     "refresh_time": 10,
     "responses": [
-        "我一直都在呢，您请说。",
-        "在的呢，请随时吩咐我。",
-        "来啦来啦，请告诉我吧。",
-        "您请说，我正听着。",
-        "请您讲话，我准备好了。",
-        "请您说出指令吧。",
-        "我认真听着呢，请讲。",
-        "请问您需要什么帮助？",
-        "我在这里，等候您的指令。",
+        "您好，请讲。",
     ],
 }
 
@@ -48,14 +40,37 @@ async def handleHelloMessage(conn: "ConnectionHandler", msg_json):
         conn.audio_format = format
         conn.welcome_msg["audio_params"] = audio_params
     features = msg_json.get("features")
+    client_source = "web"
     if features:
         conn.logger.bind(tag=TAG).debug(f"客户端特性: {features}")
         conn.features = features
-        if features.get("mcp"):
-            conn.logger.bind(tag=TAG).debug("客户端支持MCP")
-            conn.mcp_client = MCPClient()
-            # 发送初始化
-            asyncio.create_task(send_mcp_initialize_message(conn))
+        client_source = features.get("client_mode", "web")
+
+    client_source = conn.set_client_source(client_source)
+    coordinator = getattr(conn.server, "interaction_coordinator", None)
+    if coordinator and not coordinator.is_source_allowed(client_source):
+        conn.welcome_msg["access_mode"] = coordinator.mode
+        conn.welcome_msg["client_source"] = client_source
+        conn.welcome_msg["access_status"] = "denied"
+        await conn.websocket.send(json.dumps(conn.welcome_msg))
+        await conn.send_access_status(
+            "denied",
+            f"当前语音入口模式为 {coordinator.mode}，不接受 {client_source} 客户端",
+        )
+        conn.logger.bind(tag=TAG).warning(
+            f"拒绝语音客户端: 模式={coordinator.mode}, 来源={client_source}"
+        )
+        await conn.close(conn.websocket)
+        return
+
+    if features and features.get("mcp"):
+        conn.logger.bind(tag=TAG).debug("客户端支持MCP")
+        conn.mcp_client = MCPClient()
+        asyncio.create_task(send_mcp_initialize_message(conn))
+
+    if coordinator:
+        conn.welcome_msg["access_mode"] = coordinator.mode
+        conn.welcome_msg["client_source"] = client_source
 
     await conn.websocket.send(json.dumps(conn.welcome_msg))
 
@@ -96,7 +111,7 @@ async def checkWakeupWords(conn: "ConnectionHandler", text):
             "voice": "default",
             "file_path": "config/assets/wakeup_words_short.wav",
             "time": 0,
-            "text": "我在这里哦！",
+            "text": "您好，请讲。",
         }
 
     # 获取音频数据

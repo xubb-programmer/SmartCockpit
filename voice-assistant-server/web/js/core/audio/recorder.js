@@ -23,6 +23,8 @@ export class AudioRecorder {
         this.isStopping = false;
         this.workletModuleLoaded = false;
         this.stopResolver = null;
+        this.captureSuppressionReasons = new Set();
+        this.captureSuppressed = false;
         this.stats = this.createEmptyStats();
         // Callback functions
         this.onRecordingStart = null;
@@ -47,6 +49,45 @@ export class AudioRecorder {
     // Set WebSocket instance
     setWebSocket(ws) {
         this.websocket = ws;
+    }
+
+    applyCaptureState() {
+        const suppressed = this.captureSuppressionReasons.size > 0;
+        this.captureSuppressed = suppressed;
+        if (this.mediaStream) {
+            this.mediaStream.getAudioTracks().forEach(track => {
+                track.enabled = !suppressed;
+            });
+        }
+    }
+
+    setCaptureSuppressed(suppressed, reason = '未指定') {
+        const wasSuppressed = this.captureSuppressed;
+        if (suppressed) {
+            this.captureSuppressionReasons.add(reason);
+            this.pcmDataBuffer = new Int16Array(0);
+        } else {
+            this.captureSuppressionReasons.delete(reason);
+        }
+        this.applyCaptureState();
+
+        if (wasSuppressed !== this.captureSuppressed) {
+            log(
+                this.captureSuppressed
+                    ? `[音频诊断][回声保护] 已暂停麦克风上行，原因=${reason}`
+                    : `[音频诊断][回声保护] 已恢复麦克风上行，原因=${reason}`,
+                'info'
+            );
+        }
+    }
+
+    clearCaptureSuppression() {
+        const wasSuppressed = this.captureSuppressed;
+        this.captureSuppressionReasons.clear();
+        this.applyCaptureState();
+        if (wasSuppressed) {
+            log('[音频诊断][回声保护] 已清除麦克风上行暂停状态', 'info');
+        }
     }
 
     // Get AudioContext instance
@@ -269,7 +310,7 @@ export class AudioRecorder {
         if (this.isRecording) return false;
         try {
             // Check if WebSocketHandler instance exists
-            const { getWebSocketHandler } = await import('../network/websocket.js');
+            const { getWebSocketHandler } = await import('../network/websocket.js?v=0903a');
             const wsHandler = getWebSocketHandler();
             // If machine is speaking, send abort message
             if (wsHandler && wsHandler.isRemoteSpeaking && wsHandler.currentSessionId) {
@@ -291,6 +332,7 @@ export class AudioRecorder {
             await this.cleanupAudioResources();
             log('请至少录制1-2秒音频以确保收集足够的数据', 'info');
             this.mediaStream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, sampleRate: 16000, channelCount: 1 } });
+            this.applyCaptureState();
             this.audioContext = this.getAudioContext();
             if (this.audioContext.state === 'suspended') {
                 this.audioContext.resume().catch(error => {
@@ -455,7 +497,8 @@ export class AudioRecorder {
             ...this.stats,
             isRecording: this.isRecording,
             audioContextState: this.audioContext?.state || '未创建',
-            audioContextSampleRate: this.audioContext?.sampleRate || 0
+            audioContextSampleRate: this.audioContext?.sampleRate || 0,
+            captureSuppressed: this.captureSuppressed
         };
     }
 

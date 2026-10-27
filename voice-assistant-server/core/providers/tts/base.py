@@ -18,7 +18,11 @@ from core.utils import opus_encoder_utils
 from core.utils.tts import MarkdownCleaner, convert_percentage_to_range
 from core.utils.output_counter import add_device_output
 from core.handle.reportHandle import enqueue_tts_report
-from core.handle.sendAudioHandle import sendAudioMessage
+from core.handle.sendAudioHandle import (
+    _wait_for_audio_completion,
+    sendAudioMessage,
+    send_tts_message,
+)
 from core.utils.util import audio_bytes_to_data_stream, audio_to_data_stream
 from core.providers.tts.dto.dto import (
     TTSMessageDTO,
@@ -345,6 +349,15 @@ class TTSProviderBase(ABC):
                     self._process_remaining_text_stream(opus_handler=self.handle_opus)
                     tts_file = message.content_file
                     if tts_file and os.path.exists(tts_file):
+                        if getattr(message, "allow_barge_in", False):
+                            self.tts_audio_queue.put(
+                                {
+                                    "type": "control",
+                                    "state": "music_start",
+                                    "sentence_id": message.sentence_id,
+                                    "wait_for_pending_audio": True,
+                                }
+                            )
                         self._process_audio_file_stream(
                             tts_file, callback=self.handle_opus
                         )
@@ -362,6 +375,20 @@ class TTSProviderBase(ABC):
                 )
                 continue
 
+    async def _send_audio_control(self, item):
+        sentence_id = item.get("sentence_id")
+        if self.conn.client_abort or (
+            sentence_id and sentence_id != self.conn.sentence_id
+        ):
+            return
+        if item.get("wait_for_pending_audio"):
+            await _wait_for_audio_completion(self.conn)
+        if self.conn.client_abort or (
+            sentence_id and sentence_id != self.conn.sentence_id
+        ):
+            return
+        await send_tts_message(self.conn, item["state"])
+
     def _audio_play_priority_thread(self):
         # 需要上报的文本和音频列表
         enqueue_text = None
@@ -371,6 +398,12 @@ class TTSProviderBase(ABC):
             try:
                 try:
                     item = self.tts_audio_queue.get(timeout=0.1)
+                    if isinstance(item, dict) and item.get("type") == "control":
+                        future = asyncio.run_coroutine_threadsafe(
+                            self._send_audio_control(item), self.conn.loop
+                        )
+                        future.result()
+                        continue
                     if len(item) == 4:
                         sentence_type, audio_datas, text, sentence_id = item
                     else:

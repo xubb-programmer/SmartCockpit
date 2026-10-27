@@ -37,6 +37,7 @@ from config.config_loader import get_config_from_api_async
 from core.auth import AuthManager, AuthenticationError
 from core.utils.modules_initialize import initialize_modules
 from core.utils.util import check_vad_update, check_asr_update
+from core.interaction_access import InteractionCoordinator
 
 TAG = __name__
 
@@ -46,6 +47,10 @@ class WebSocketServer:
         self.config = config
         self.logger = setup_logging()
         self.config_lock = asyncio.Lock()
+        self.interaction_coordinator = InteractionCoordinator(config, self.logger)
+        self.logger.bind(tag=TAG).info(
+            f"语音入口模式: {self.interaction_coordinator.mode}"
+        )
         modules = initialize_modules(
             self.logger,
             self.config,

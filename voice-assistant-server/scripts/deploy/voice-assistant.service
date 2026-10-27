@@ -5,11 +5,11 @@ After=network-online.target NetworkManager-wait-online.service sound.target
 
 [Service]
 Type=oneshot
-User=ztl
-Group=ztl
+User=jw
+Group=jw
 WorkingDirectory=/opt/jw/voice-assistant-server/scripts/deploy
-Environment=HOME=/home/ztl
-Environment=USER=ztl
+Environment=HOME=/home/jw
+Environment=USER=jw
 Environment=VOICE_ASSISTANT_MODEL=qwen3-4b
 ExecStartPre=/bin/bash -c 'for i in {1..60}; do ip -4 address show scope global | grep -q "inet " && exit 0; sleep 1; done; exit 1'
 ExecStart=/opt/jw/voice-assistant-server/scripts/deploy/voice-assistant.sh start --no-follow

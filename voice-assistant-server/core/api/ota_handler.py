@@ -17,6 +17,38 @@ TAG = __name__
 
 _VEHICLE_PROFILE_ID_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 
+_VEHICLE_ACTION_CN = {
+    "enable": "上电", "disable": "下电",
+    "view_large": "切大视场", "view_small": "切小视场",
+    "zoom_in": "放大", "zoom_out": "缩小",
+    "focus_auto": "自动聚焦", "focus_in": "调焦加", "focus_out": "调焦减",
+    "cross_show": "开十字丝", "cross_hide": "关十字丝",
+    "brightness_up": "亮度加", "brightness_down": "亮度减",
+    "enhance_on": "开增强", "enhance_off": "关增强",
+    "fog_on": "开透雾", "fog_off": "关透雾",
+    "digital_zoom": "数字变倍",
+    "polarity_black": "切黑热", "polarity_white": "切白热",
+    "contrast_up": "对比度加", "contrast_down": "对比度减",
+    "auto": "自动模式", "gamma_correction": "图像校正",
+    "scene_correction": "场景校正",
+    "zero_return": "回零", "zero_drift": "零漂校正",
+    "scan_circle": "周扫", "digital_guide": "数字引导", "scan_stop": "停扫",
+    "detect_on": "开识别", "detect_off": "关识别",
+    "track_on": "开跟踪", "track_off": "关跟踪",
+    "park_work": "驻车展开", "drive_work": "行车展开",
+    "onekey_work": "一键展开", "end_work": "一键撤收",
+    "stop_work": "停止", "mast_raise": "升桅", "mast_lower": "降桅",
+    "single_level": "单次调平", "recon_start": "开始侦察",
+}
+
+_VEHICLE_HELP_COMMAND_OVERRIDES = {
+    ("tracker", "detect_on"): "开启目标检测",
+    ("tracker", "detect_off"): "关闭目标检测",
+    ("tracker", "track_on"): "开启目标跟踪",
+    ("tracker", "track_off"): "关闭目标跟踪",
+    ("mast", "recon_start"): "目标侦察",
+}
+
 
 def _safe_basename(filename: str) -> str:
     # Prevent directory traversal
@@ -572,31 +604,15 @@ class OTAHandler(BaseHandler):
             vehicle_name = profile.get("name", profile_name)
             vc = profile.get("vehicle_control", {})
             devices = vc.get("devices", {})
-
-            # 动作中文映射
-            action_cn = {
-                "enable": "上电", "disable": "下电",
-                "view_large": "切大视场", "view_small": "切小视场",
-                "zoom_in": "放大", "zoom_out": "缩小",
-                "focus_auto": "自动聚焦", "focus_in": "调焦加", "focus_out": "调焦减",
-                "cross_show": "开十字丝", "cross_hide": "关十字丝",
-                "brightness_up": "亮度加", "brightness_down": "亮度减",
-                "enhance_on": "开增强", "enhance_off": "关增强",
-                "fog_on": "开透雾", "fog_off": "关透雾",
-
-                "digital_zoom": "数字变倍",
-                "polarity_black": "切黑热", "polarity_white": "切白热",
-                "contrast_up": "对比度加", "contrast_down": "对比度减",
-                "auto": "自动模式", "gamma_correction": "图像校正", "scene_correction": "场景校正",
-                "zero_return": "回零", "zero_drift": "零漂校正",
-                "scan_circle": "周扫", "scan_stop": "停扫",
-                "detect_on": "开识别", "detect_off": "关识别",
-                "track_on": "开跟踪", "track_off": "关跟踪",
-                "park_work": "驻车展开", "drive_work": "行车展开",
-                "onekey_work": "一键展开", "end_work": "一键撤收",
-                "stop_work": "停止", "mast_raise": "升桅", "mast_lower": "降桅",
-                "single_level": "单次调平",
-                "recon_start": "开始侦察",
+            param_rules = vc.get("param_rules") or {}
+            actions_requiring_params = {
+                action
+                for action, rules in param_rules.items()
+                if isinstance(rules, dict)
+                and any(
+                    isinstance(rule, dict) and rule.get("required")
+                    for rule in rules.values()
+                )
             }
 
             # 生成指令列表
@@ -607,10 +623,15 @@ class OTAHandler(BaseHandler):
             for dev_id, spec in devices.items():
                 cn_name = (spec.get("cn_names") or [dev_id])[0]
                 for act in (spec.get("actions") or []):
-                    act_cn = action_cn.get(act, act)
+                    if act in actions_requiring_params:
+                        continue
+                    act_cn = _VEHICLE_ACTION_CN.get(act, act)
+                    command_text = _VEHICLE_HELP_COMMAND_OVERRIDES.get(
+                        (dev_id, act), f"{cn_name}{act_cn}"
+                    )
                     device_cmds.append({
-                        "text": f"{cn_name}{act_cn}",
-                        "description": f"控制{cn_name}执行{act_cn}",
+                        "text": command_text,
+                        "description": f"执行{command_text}",
                     })
             if device_cmds:
                 commands.append({
@@ -620,14 +641,35 @@ class OTAHandler(BaseHandler):
                 })
 
             # 批量指令
-            if len(devices) > 1:
+            batch_items = []
+            all_targets = vc.get("all_targets") or {}
+            for action, command_text in (
+                ("enable", "所有设备上电"),
+                ("disable", "所有设备下电"),
+            ):
+                target_ids = [
+                    target_id for target_id in (all_targets.get(action) or [])
+                    if target_id in devices
+                    and action in (devices[target_id].get("actions") or [])
+                ]
+                if not target_ids:
+                    continue
+                target_names = [
+                    (devices[target_id].get("cn_names") or [target_id])[0]
+                    for target_id in target_ids
+                ]
+                batch_items.append({
+                    "text": command_text,
+                    "description": (
+                        f"同时控制{'、'.join(target_names)}"
+                        f"{_VEHICLE_ACTION_CN[action]}"
+                    ),
+                })
+            if batch_items:
                 commands.append({
                     "category": "批量操作",
                     "icon": "⚡",
-                    "items": [
-                        {"text": "所有设备上电", "description": "所有设备一键开机"},
-                        {"text": "所有设备下电", "description": "所有设备一键关机"},
-                    ],
+                    "items": batch_items,
                 })
 
             # 带参数指令
@@ -637,9 +679,13 @@ class OTAHandler(BaseHandler):
                 gimbal_cn = (devices["gimbal"].get("cn_names") or ["转台"])[0]
                 gimbal_actions = devices["gimbal"].get("actions") or []
                 if "scan_circle" in gimbal_actions:
-                    param_items.append({"text": f"{gimbal_cn}顺时针周扫3圈", "description": "全周扫描（方向+圈数）"})
-                    param_items.append({"text": f"{gimbal_cn}逆时针周扫2圈", "description": "全周扫描（方向+圈数）"})
-
+                    param_items.append({"text": f"{gimbal_cn}顺时针周扫", "description": "顺时针全周扫描"})
+                    param_items.append({"text": f"{gimbal_cn}逆时针周扫", "description": "逆时针全周扫描"})
+                if "digital_guide" in gimbal_actions:
+                    param_items.append({
+                        "text": f"{gimbal_cn}转到方位82.67度俯仰10.5度",
+                        "description": "按方位角和俯仰角控制朝向",
+                    })
             # 检查是否有白光数字变倍
             if "vis_cam" in devices:
                 vis_cn = (devices["vis_cam"].get("cn_names") or ["白光"])[0]
@@ -685,6 +731,16 @@ class OTAHandler(BaseHandler):
                     {"text": "现在几点了", "description": "查询当前时间"},
                     {"text": "今天几号星期几", "description": "查询日期和星期"},
                 ])
+            vision_enabled = bool(
+                (self.config.get("runtime_capabilities") or {}).get(
+                    "vision_enabled", False
+                )
+            )
+            if "vision_analyze" in functions and vision_enabled:
+                general_items.append({
+                    "text": "分析前方画面",
+                    "description": "分析当前视频画面",
+                })
             if general_items:
                 commands.append({
                     "category": "通用功能",

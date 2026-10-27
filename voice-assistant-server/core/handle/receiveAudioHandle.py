@@ -19,7 +19,9 @@ async def handleAudioMessage(conn: "ConnectionHandler", audio):
     if conn.is_exiting:
         return
 
-    allow_barge_in = bool(conn.config.get("allow_barge_in", False))
+    allow_barge_in = bool(conn.config.get("allow_barge_in", False)) or bool(
+        getattr(conn, "music_barge_in_active", False)
+    )
     suppressing_echo = (
         conn.client_is_speaking
         or time.monotonic() < getattr(conn, "ignore_audio_until", 0.0)

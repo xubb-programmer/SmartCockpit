@@ -111,6 +111,15 @@ class RuntimeVisionCapabilityTests(unittest.TestCase):
 
         self.assertIn("目标侦察=>@C|mast|recon_start", source)
 
+    def test_mast_onekey_actions_are_explicitly_distinguished(self):
+        source = (
+            SERVER_ROOT / "data" / "vehicle_profiles" / "z1_scout.yaml"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn("桅杆一键展开=>@C|mast|onekey_work", source)
+        self.assertIn("桅杆一键撤收=>@C|mast|end_work", source)
+        self.assertNotIn("一键展开撤收", source)
+
 
 if __name__ == "__main__":
     unittest.main()

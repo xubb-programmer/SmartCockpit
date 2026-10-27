@@ -25,30 +25,36 @@ prompt: |
   【设备动作】
   白光=vis_cam：上电/打开 enable；下电/关闭 disable；大视场 view_large；小视场 view_small；放大 zoom_in；缩小 zoom_out；自动聚焦 focus_auto；调焦加 focus_in；调焦减 focus_out；开/关十字丝 cross_show/cross_hide；亮度加/减 brightness_up/brightness_down；开/关增强 enhance_on/enhance_off；开/关透雾 fog_on/fog_off；数字变倍 digital_zoom。
   热像=ir_cam：enable、disable、view_large、view_small、zoom_in、zoom_out、focus_auto、focus_in、focus_out、cross_show、cross_hide、brightness_up、brightness_down、enhance_on、enhance_off；黑热 polarity_black；白热 polarity_white；对比度加/减 contrast_up/contrast_down；自动模式 auto；图像校正 gamma_correction；场景校正 scene_correction。
-  稳台/转台/云台=gimbal：打开/关闭 enable/disable；回零 zero_return；零漂 zero_drift；周扫 scan_circle；停止扫描 scan_stop。
+  稳台/转台/云台=gimbal：打开/关闭 enable/disable；回零 zero_return；零漂 zero_drift；周扫/全周扫描 scan_circle（仅限该扫描方式）；数字引导/控制朝向 digital_guide；停止扫描 scan_stop。
   激光=laser：打开 enable；关闭 disable。
   目标检测/目标识别/跟踪器/跟踪=tracker：开/关检测 detect_on/detect_off；开/关跟踪 track_on/track_off。
-  桅杆=mast：驻车展开 park_work；行车展开 drive_work；一键展开 onekey_work；撤收 end_work；停止 stop_work；升桅 mast_raise；降桅 mast_lower；单次调平 single_level；开始侦察/目标侦察 recon_start。
+  桅杆=mast：驻车展开 park_work；行车展开 drive_work；一键展开 onekey_work；一键撤收/撤收/收回 end_work；停止 stop_work；升桅 mast_raise；降桅 mast_lower；单次调平 single_level；开始侦察/目标侦察 recon_start。
 
   【控制规则】
   1. 按整句话和同音错字理解；“设备名+动作”是立即控制。
   2. enable/disable只表示整机上电或下电。开启/关闭十字丝、增强、透雾、检测、识别、跟踪时，只输出对应功能动作，不能额外输出enable/disable。
   3. 未说设备且未说全部时询问目标；“所有/全部设备”的target必须是all。
   4. 多目标同动作仅在各目标都支持时合并；不同动作按原顺序输出多行，不能把动作写进参数段。
-  5. 只传用户明确说出的参数。digital_zoom必须用第4段zoom_level=1/2/4；scan_circle可用第4段direction=cw/ccw和count=圈数。
+  5. 只传用户明确说出的参数。digital_zoom必须用第4段zoom_level=1/2/4；scan_circle中顺时针严格用direction=cw，逆时针严格用direction=ccw；digital_guide必须用azimuth=方位角,pitch=俯仰角，两个参数均必填并保留正负号和小数。
   6. 只有询问当前状态或是否已执行才用@S；礼貌形式的明确动作仍用@C。
   7. 同音容错：调焦家/加=>focus_in，周嫂/周扫=>scan_circle，上殿/上电=>enable，市场/视场按设备语义判断。
   8. “目标侦察”本身是桅杆动作mast+recon_start，不是稳台上电。
+  9. 未列出的动作不得近似或替换为已有动作；直接简短说明当前车型不支持。scan_circle仅用于用户明确要求周扫或全周扫描，不得用于其他扫描方式。
 
   【关键示例】
   所有设备上电=>@C|all|enable
   全部设备下电=>@C|all|disable
   所有设备什么状态=>@S|all
   目标侦察=>@C|mast|recon_start
+  桅杆一键展开=>@C|mast|onekey_work
+  桅杆一键撤收=>@C|mast|end_work
   白光调焦减=>@C|vis_cam|focus_out
   白光增强开=>@C|vis_cam|enhance_on
   白光数字变倍4倍=>@C|vis_cam|digital_zoom|zoom_level=4
-  稳台顺时针周扫3圈=>@C|gimbal|scan_circle|direction=cw,count=3
+  稳台顺时针周扫=>@C|gimbal|scan_circle|direction=cw
+  稳台逆时针周扫=>@C|gimbal|scan_circle|direction=ccw
+  稳台转到方位82.67度俯仰10.5度=>@C|gimbal|digital_guide|azimuth=82.67,pitch=10.5
+  稳台扇扫=>当前车型不支持该功能
   白光上电并增加亮度=>
   @C|vis_cam|enable
   @C|vis_cam|brightness_up
@@ -96,11 +102,13 @@ vehicle_control:
     scan_circle:
       direction:
         allowed: [cw, ccw]
-      count:
-        integer: true
-        min: 1
-        max: 99
-
+    digital_guide:
+      azimuth:
+        number: true
+        required: true
+      pitch:
+        number: true
+        required: true
   # “所有设备”是动作相关的逻辑组，不包含没有整机电源动作的跟踪器和桅杆。
   all_targets:
     enable: [vis_cam, ir_cam, gimbal, laser]
@@ -160,13 +168,14 @@ vehicle_control:
         - scene_correction
     gimbal:
       cn_names: ["稳台", "转台", "云台"]
-      capability: "稳台支持开关机、回零、零漂、全周扫描和停止扫描。"
+      capability: "稳台支持开关机、回零、零漂、全周扫描、数字引导控制朝向和停止扫描。"
       actions:
         - enable
         - disable
         - zero_return
         - zero_drift
         - scan_circle
+        - digital_guide
         - scan_stop
     laser:
       cn_names: ["激光", "激光器"]
@@ -175,7 +184,7 @@ vehicle_control:
         - enable
         - disable
     tracker:
-      cn_names: ["跟踪", "跟踪器"]
+      cn_names: ["跟踪器", "跟踪", "目标检测", "目标识别"]
       capability: "跟踪器支持目标检测、识别和跟踪开关。"
       actions:
         - detect_on
@@ -184,7 +193,7 @@ vehicle_control:
         - track_off
     mast:
       cn_names: ["桅杆"]
-      capability: "桅杆支持驻车展开、行车展开、一键展开撤收、升降桅、单次调平和目标侦察。"
+      capability: "桅杆支持驻车展开、行车展开、一键展开、一键撤收、升降桅、单次调平和目标侦察。"
       actions:
         - park_work
         - drive_work

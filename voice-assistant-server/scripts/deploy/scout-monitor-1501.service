@@ -6,11 +6,11 @@ Before=MediaServer.service monitor.service serial.service web.service zmq.servic
 
 [Service]
 Type=simple
-User=ztl
-Group=ztl
+User=jw
+Group=jw
 WorkingDirectory=/opt/jw/vehicle-control-server/binr
-Environment=HOME=/home/ztl
-Environment=USER=ztl
+Environment=HOME=/home/jw
+Environment=USER=jw
 Environment=DISPLAY=:0
 Environment=XAUTHORITY=/run/user/1000/gdm/Xauthority
 Environment=XDG_RUNTIME_DIR=/run/user/1000

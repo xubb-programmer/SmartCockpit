@@ -3,7 +3,7 @@ import { checkOpusLoaded, initOpusEncoder } from './core/audio/opus-codec.js';
 import { getAudioPlayer } from './core/audio/player.js';
 import { checkMicrophoneAvailability, getAudioRecorder, isHttpNonLocalhost } from './core/audio/recorder.js';
 import { initMcpTools } from './core/mcp/tools.js';
-import { uiController } from './ui/controller.js';
+import { uiController } from './ui/controller.js?v=0903a';
 import { videoUIController } from './ui/video-controller.js?v=0829a';
 import { log } from './utils/logger.js';
 

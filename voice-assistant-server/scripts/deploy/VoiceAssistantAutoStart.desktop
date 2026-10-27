@@ -1,0 +1,14 @@
+[Desktop Entry]
+Version=1.0
+Type=Application
+Name=Voice Assistant Startup
+Name[zh_CN]=语音助手自动启动
+Comment=Wait for SmartCockpit services and open the Web client
+Comment[zh_CN]=等待语音服务就绪后提示状态并打开 Web 客户端
+Exec=/opt/jw/voice-assistant-server/scripts/deploy/startup-notifier.sh --autostart
+Icon=/opt/jw/voice-assistant-server/web/voice-assistant-icon.svg
+Path=/opt/jw/voice-assistant-server/scripts/deploy
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+StartupNotify=false

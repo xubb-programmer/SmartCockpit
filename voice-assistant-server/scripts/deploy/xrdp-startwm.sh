@@ -22,6 +22,19 @@ export GNOME_SHELL_SESSION_MODE=ubuntu
 export GDK_BACKEND=x11
 export LIBGL_ALWAYS_SOFTWARE=1
 export GALLIUM_DRIVER=llvmpipe
+export CLUTTER_DEFAULT_FPS=30
+export NO_AT_BRIDGE=1
 export LD_LIBRARY_PATH="/lib/aarch64-linux-gnu:/usr/lib/aarch64-linux-gnu${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
 
-exec dbus-run-session -- gnome-shell --x11 --sm-disable --mode=ubuntu
+# GNOME Shell alone does not start the media-key daemon. Without a daemon in
+# this isolated D-Bus session, Ctrl+Alt+T can open the terminal on DISPLAY=:0.
+exec dbus-run-session -- /bin/sh -c '
+    gsettings set org.gnome.desktop.interface enable-animations false >/dev/null 2>&1 || true
+    for daemon in gsd-xsettings gsd-keyboard gsd-media-keys; do
+        daemon_path="/usr/libexec/${daemon}"
+        if [ -x "${daemon_path}" ]; then
+            "${daemon_path}" >/dev/null 2>&1 &
+        fi
+    done
+    exec gnome-shell --x11 --sm-disable --mode=ubuntu
+'

@@ -11,6 +11,7 @@ vehicle_control 车辆设备控制插件（闭环版）。
 from __future__ import annotations
 
 import json
+import math
 import asyncio
 import requests
 from typing import Dict, Tuple, TYPE_CHECKING
@@ -60,7 +61,8 @@ vehicle_control_function_desc = {
                         "可选参数字典，仅传用户明确说出的值，不自行编造。所有参数值为字符串类型。"
                         "已知参数："
                         "digital_zoom 动作可传 zoom_level（倍数，如 '1'/'2'/'4'）；"
-                        "scan_circle 动作可传 direction（方向，'cw'顺时针/'ccw'逆时针）、count（圈数）；"
+                        "scan_circle 动作可传 direction（方向，'cw'顺时针/'ccw'逆时针）；"
+                        "digital_guide 动作必须传 azimuth（方位角）和 pitch（俯仰角），均为数值；"
                     ),
                 },
             },
@@ -112,7 +114,7 @@ _ACTION_CN: Dict[str, str] = {
     "zero_return":      "归零中",
     "zero_drift":       "零漂校正中",
     "scan_circle":      "开始周扫",
-
+    "digital_guide":    "正在调整朝向",
     "scan_stop":        "扫描已停止",
     # 跟踪器
     "detect_on":        "识别已开启",
@@ -128,7 +130,6 @@ _ACTION_CN: Dict[str, str] = {
     "mast_raise":       "正在举升",
     "mast_lower":       "正在下降",
     "single_level":     "单次调平中",
-
     "recon_start":      "开始目标侦察",
 }
 
@@ -192,6 +193,21 @@ def _parse_number_text(value: object):
         if left in _CN_DIGITS and (not right or right in _CN_DIGITS):
             return _CN_DIGITS[left] * 10 + (_CN_DIGITS[right] if right else 0)
     return None
+
+
+def _parse_finite_number(value: object):
+    if isinstance(value, bool):
+        return None
+    text = str(value).strip()
+    if text.endswith("度"):
+        text = text[:-1].strip()
+    try:
+        number = float(text)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(number):
+        return None
+    return int(number) if number.is_integer() else number
 
 
 def _canonical_param_value(value: object, rule: dict) -> str:
@@ -265,6 +281,17 @@ def _validate_and_normalize_params(vc, action, params):
             if max_value is not None and parsed > int(max_value):
                 return False, f"参数{name}过大", None
             value = str(parsed)
+        elif rule.get("number"):
+            number = _parse_finite_number(value)
+            if number is None:
+                return False, f"参数{name}必须是数值", None
+            min_value = rule.get("min")
+            max_value = rule.get("max")
+            if min_value is not None and number < float(min_value):
+                return False, f"参数{name}过小", None
+            if max_value is not None and number > float(max_value):
+                return False, f"参数{name}过大", None
+            value = number
 
         allowed = [str(item) for item in rule.get("allowed", [])]
         if allowed and value not in allowed:

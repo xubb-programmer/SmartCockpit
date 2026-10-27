@@ -43,6 +43,7 @@ class ASRProviderBase(ABC):
     # 有序处理ASR音频
     def asr_text_priority_thread(self, conn: "ConnectionHandler"):
         while not conn.stop_event.is_set():
+            message = None
             try:
                 message = conn.asr_audio_queue.get(timeout=1)
                 future = asyncio.run_coroutine_threadsafe(
@@ -57,9 +58,23 @@ class ASRProviderBase(ABC):
                     f"处理ASR文本失败: {str(e)}, 类型: {type(e).__name__}, 堆栈: {traceback.format_exc()}"
                 )
                 continue
+            finally:
+                if message is not None:
+                    conn.asr_audio_queue.task_done()
 
     # 接收音频
     async def receive_audio(self, conn: "ConnectionHandler", audio, audio_have_voice):
+        if getattr(conn, "turn_rejected", False):
+            if conn.client_voice_stop:
+                conn.reset_audio_states()
+                conn.turn_rejected = False
+            return
+
+        if audio_have_voice and not getattr(conn, "turn_acquired", False):
+            if not await conn.acquire_interaction_turn("speech_detected"):
+                conn.turn_rejected = True
+                return
+
         if conn.client_listen_mode == "manual":
             # 手动模式：缓存音频用于ASR识别
             conn.asr_audio.append(audio)
@@ -86,6 +101,7 @@ class ASRProviderBase(ABC):
                     logger.bind(tag=TAG).warning(
                         f"[音频诊断][ASR] 音频仅{len(asr_audio_task)}帧，少于最低16帧，已忽略"
                     )
+                    await conn.release_interaction_turn("audio_too_short")
 
     # 处理语音停止
     async def handle_voice_stop(self, conn: "ConnectionHandler", asr_audio_task: List[bytes]):
@@ -98,19 +114,22 @@ class ASRProviderBase(ABC):
                 return
 
             total_start_time = time.monotonic()
+            logger.bind(tag=TAG).info(
+                f"[音频诊断][ASR] 开始处理录音，格式={conn.audio_format}，"
+                f"音频帧={len(asr_audio_task)}"
+            )
 
-            # 准备音频数据
-            if conn.audio_format == "pcm":
-                pcm_data = asr_audio_task
-            else:
-                pcm_data = self.decode_opus(asr_audio_task)
-
-            combined_pcm_data = b"".join(pcm_data)
-
-            # 预先准备WAV数据
+            # 只有启用声纹识别时才需要在这里解码。ASR包装层会自行解码并生成工件，
+            # 避免每句话重复执行两次Opus解码。
             wav_data = None
-            if conn.voiceprint_provider and combined_pcm_data:
-                wav_data = self._pcm_to_wav(combined_pcm_data)
+            if conn.voiceprint_provider:
+                if conn.audio_format == "pcm":
+                    voiceprint_pcm_data = asr_audio_task
+                else:
+                    voiceprint_pcm_data = self.decode_opus(asr_audio_task)
+                combined_pcm_data = b"".join(voiceprint_pcm_data)
+                if combined_pcm_data:
+                    wav_data = self._pcm_to_wav(combined_pcm_data)
 
             # 定义ASR任务
             asr_task = self.speech_to_text_wrapper(
@@ -189,11 +208,14 @@ class ASRProviderBase(ABC):
                 enqueue_asr_report(conn, enhanced_text, audio_snapshot)
                 # 使用自定义模块进行上报
                 await startToChat(conn, enhanced_text)
+            else:
+                await conn.release_interaction_turn("empty_asr_result")
         except Exception as e:
             logger.bind(tag=TAG).error(f"处理语音停止失败: {e}")
             import traceback
 
             logger.bind(tag=TAG).debug(f"异常详情: {traceback.format_exc()}")
+            await conn.release_interaction_turn("asr_error")
 
     def _build_enhanced_text(self, text: str, speaker_name: Optional[str]) -> str:
         """构建包含说话人信息的文本（仅用于纯文本ASR）"""
@@ -292,11 +314,20 @@ class ASRProviderBase(ABC):
         file_path = None
         temp_path = None
         try:
+            decode_started_at = time.monotonic()
+            logger.bind(tag=TAG).info(
+                f"[音频诊断][ASR] 开始音频解码，格式={audio_format}，"
+                f"音频帧={len(opus_data)}"
+            )
             if audio_format == "pcm":
                 pcm_data = opus_data
             else:
                 pcm_data = self.decode_opus(opus_data)
             combined_pcm_data = b"".join(pcm_data)
+            logger.bind(tag=TAG).info(
+                f"[音频诊断][ASR] 音频解码完成，PCM={len(combined_pcm_data)}字节，"
+                f"耗时={(time.monotonic() - decode_started_at) * 1000:.0f}毫秒"
+            )
 
             free_space = shutil.disk_usage(self.output_dir).free
             if free_space < len(combined_pcm_data) * 2:
@@ -320,8 +351,16 @@ class ASRProviderBase(ABC):
                     temp_path=temp_path,
                 )
 
+            provider_started_at = time.monotonic()
+            logger.bind(tag=TAG).info(
+                f"[音频诊断][ASR] 调用识别器，PCM={len(combined_pcm_data)}字节"
+            )
             text, _ = await self.speech_to_text(
                 opus_data, session_id, audio_format, artifacts
+            )
+            logger.bind(tag=TAG).info(
+                f"[音频诊断][ASR] 识别器返回，"
+                f"耗时={(time.monotonic() - provider_started_at) * 1000:.0f}毫秒"
             )
             return text, file_path
         except OSError as e:

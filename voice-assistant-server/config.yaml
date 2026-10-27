@@ -79,6 +79,46 @@ stop_tts_notify_voice: "config/assets/tts_notify.mp3"
 # 是否启用WebSocket心跳保活机制
 enable_websocket_ping: false
 
+# 语音入口模式：web（现有浏览器）、wakeup（板端唤醒词）、hybrid（两者并存）。
+# 默认 web 保持历史行为；wakeup/hybrid 才会由部署脚本启动板端无界面客户端。
+voice_access:
+  mode: web
+  arbitration:
+    max_turn_seconds: 120
+  headless:
+    websocket_url: ws://127.0.0.1:18000/voice_assistant/v1/
+    wake_words: ["你好小江"]
+    # auto 优先使用 PulseAudio 共享设备，桌面浏览器可同时使用麦克风和扬声器；无 PulseAudio 时回退 ALSA。
+    audio_backend: auto
+    input_device: auto
+    output_device: auto
+    sample_rate: 16000
+    output_sample_rate: 24000
+    frame_duration_ms: 60
+    capture_chunk_ms: 100
+    command_timeout_seconds: 12
+    response_timeout_seconds: 120
+    ping_interval_seconds: 30
+    # 提示音播放结束后等待声学尾音消退，避免扬声器回灌被识别成用户指令。
+    echo_suppression_tail_ms: 200
+    # 板端本地端点检测：使用噪声底和双阈值，避免短句被误判为无声
+    speech_rms_threshold: 0.006
+    speech_rms_threshold_low: 0.003
+    speech_noise_multiplier: 2.0
+    speech_noise_low_multiplier: 1.35
+    speech_start_hold_ms: 40
+    speech_min_seconds: 0.8
+    speech_end_seconds: 0.8
+    capture_queue_seconds: 3
+    # hybrid开机时持续等待桌面PulseAudio，0表示不超时，避免客户端提前退出。
+    audio_start_timeout_seconds: 0
+    keywords_score: 3.0
+    keywords_threshold: 0.12
+    num_trailing_blanks: 1
+    model_dir: models/kws/sherpa-onnx-kws-zipformer-wenetspeech-3.3M-2024-01-01-mobile
+    keywords_file: config/kws_keywords.txt
+    acknowledgement_audio: config/assets/wakeup_words_short.wav
+
 
 # TTS音频发送延迟配置
 # tts_audio_send_delay: 控制音频包发送间隔
@@ -119,17 +159,7 @@ module_test:
 
 # 唤醒词，用于识别唤醒词还是讲话内容
 wakeup_words:
-  - "你好小智"
-  - "嘿你好呀"
-  - "你好小志"
-  - "小爱同学"
-  - "你好小鑫"
-  - "你好小新"
-  - "小美同学"
-  - "小龙小龙"
-  - "喵喵同学"
-  - "小滨小滨"
-  - "小冰小冰"
+  - "你好小江"
 # MCP接入点地址，地址格式为：ws://你的mcp接入点ip或者域名:端口号/mcp/?token=你的token
 # 详细教程 https://github.com/xinnan-tech/voice-assistant-esp32-server/blob/main/docs/mcp-endpoint-integration.md
 mcp_endpoint: 你的接入点 websocket地址

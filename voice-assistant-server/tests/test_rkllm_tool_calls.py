@@ -85,11 +85,11 @@ class ToolCallExtractionTests(unittest.TestCase):
     def test_compact_multi_target_and_params_are_preserved(self):
         result = self.provider._finalize_buffer(
             "@C|vis_cam,ir_cam|enable\n"
-            "@C|gimbal|scan_circle|direction=cw,count=3"
+            "@C|gimbal|scan_circle|direction=cw"
         )
 
         first = '{"name":"vehicle_control","arguments":{"target":["vis_cam","ir_cam"],"action":"enable"}}'
-        second = '{"name":"vehicle_control","arguments":{"target":"gimbal","action":"scan_circle","params":{"direction":"cw","count":"3"}}}'
+        second = '{"name":"vehicle_control","arguments":{"target":"gimbal","action":"scan_circle","params":{"direction":"cw"}}}'
         self.assertEqual(
             result,
             (f"<tool_call>{first}</tool_call><tool_call>{second}</tool_call>", None),
@@ -104,6 +104,18 @@ class ToolCallExtractionTests(unittest.TestCase):
             '{"name":"vehicle_control","arguments":'
             '{"target":"vis_cam","action":"digital_zoom",'
             '"params":{"zoom_level":"4"}}}'
+        )
+        self.assertEqual(result, (f"<tool_call>{expected}</tool_call>", None))
+
+    def test_digital_guide_preserves_decimal_angle_parameters(self):
+        result = self.provider._finalize_buffer(
+            "@C|gimbal|digital_guide|azimuth=82.67,pitch=10.5"
+        )
+
+        expected = (
+            '{"name":"vehicle_control","arguments":'
+            '{"target":"gimbal","action":"digital_guide",'
+            '"params":{"azimuth":"82.67","pitch":"10.5"}}}'
         )
         self.assertEqual(result, (f"<tool_call>{expected}</tool_call>", None))
 

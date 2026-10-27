@@ -15,6 +15,19 @@ from core.providers.asr.dto.dto import InterfaceType
 
 TAG = __name__
 
+
+async def _wait_audio_queue_drained(conn: "ConnectionHandler", reason: str) -> None:
+    """等待已经进入服务端的音频全部处理完，避免 stop/start 与音频帧乱序。"""
+    try:
+        await asyncio.wait_for(
+            asyncio.to_thread(conn.asr_audio_queue.join),
+            timeout=2.0,
+        )
+    except asyncio.TimeoutError:
+        conn.logger.bind(tag=TAG).warning(
+            f"[音频诊断][队列] {reason} 等待音频队列超时，继续处理"
+        )
+
 class ListenTextMessageHandler(TextMessageHandler):
     """Listen消息处理器"""
 
@@ -38,12 +51,22 @@ class ListenTextMessageHandler(TextMessageHandler):
             )
         if msg_json["state"] == "start":
             # 设备从播放模式切回录音模式,清除所有音频状态和缓冲区
+            await _wait_audio_queue_drained(conn, "listen/start")
             conn.reset_audio_states()
             conn.logger.bind(tag=TAG).info(
                 f"[音频诊断][协议] 收到listen/start，模式={conn.client_listen_mode}"
             )
+        elif msg_json["state"] == "cancel":
+            await _wait_audio_queue_drained(conn, "listen/cancel")
+            conn.reset_audio_states()
+            await conn.release_interaction_turn("listen_cancel")
+            conn.logger.bind(tag=TAG).info(
+                f"[音频诊断][协议] 收到listen/cancel，模式={conn.client_listen_mode}，"
+                "已清空音频且不触发识别"
+            )
         elif msg_json["state"] == "stop":
             conn.client_voice_stop = True
+            await _wait_audio_queue_drained(conn, "listen/stop")
             conn.logger.bind(tag=TAG).info(
                 f"[音频诊断][协议] 收到listen/stop，模式={conn.client_listen_mode}，"
                 f"缓存={len(conn.asr_audio)}帧"
@@ -63,6 +86,8 @@ class ListenTextMessageHandler(TextMessageHandler):
             conn.client_have_voice = False
             conn.reset_audio_states()
             if "text" in msg_json:
+                if not await conn.acquire_interaction_turn("text_detect"):
+                    return
                 conn.last_activity_time = time.time() * 1000
                 original_text = msg_json["text"]  # 保留原始文本
                 filtered_len, filtered_text = remove_punctuation_and_length(

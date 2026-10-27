@@ -274,15 +274,28 @@ class ASRProvider(ASRProviderBase):
                 return "", None
             file_path = artifacts.file_path
 
-            start_time = time.time()
+            start_time = time.monotonic()
+            logger.bind(tag=TAG).info(
+                f"[音频诊断][Sherpa] 开始读取音频，文件={file_path or '无'}"
+            )
             s = self.model.create_stream()
             samples, sample_rate = self.read_wave(file_path)
+            logger.bind(tag=TAG).info(
+                f"[音频诊断][Sherpa] 音频读取完成，采样点={len(samples)}，"
+                f"采样率={sample_rate}"
+            )
             s.accept_waveform(sample_rate, samples)
+            decode_started_at = time.monotonic()
+            logger.bind(tag=TAG).info("[音频诊断][Sherpa] 开始执行decode_stream")
             self.model.decode_stream(s)
+            logger.bind(tag=TAG).info(
+                f"[音频诊断][Sherpa] decode_stream完成，"
+                f"耗时={(time.monotonic() - decode_started_at) * 1000:.0f}毫秒"
+            )
             raw_text = s.result.text
             text = self._apply_text_corrections(raw_text)
             logger.bind(tag=TAG).debug(
-                f"语音识别耗时: {time.time() - start_time:.3f}s | "
+                f"语音识别耗时: {time.monotonic() - start_time:.3f}s | "
                 f"原始结果: {raw_text} | 最终结果: {text}"
             )
 

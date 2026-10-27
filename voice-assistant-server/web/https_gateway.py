@@ -273,7 +273,15 @@ class HttpsGateway:
         if not os.path.isfile(file_path):
             raise web.HTTPNotFound(text="not found\n")
 
-        return web.FileResponse(file_path)
+        response = web.FileResponse(file_path)
+        response.headers.update(
+            {
+                "Cache-Control": "no-store, no-cache, must-revalidate, max-age=0",
+                "Pragma": "no-cache",
+                "Expires": "0",
+            }
+        )
+        return response
 
 
 def create_app(web_dir, http_target, ws_target):

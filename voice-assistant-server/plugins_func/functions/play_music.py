@@ -279,6 +279,7 @@ async def play_local_music(conn: "ConnectionHandler", specific_file=None):
                 sentence_type=SentenceType.MIDDLE,
                 content_type=ContentType.FILE,
                 content_file=music_path,
+                allow_barge_in=True,
             )
         )
         if conn.intent_type == "intent_llm":

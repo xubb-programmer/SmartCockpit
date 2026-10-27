@@ -35,9 +35,12 @@ class TTSMessageDTO:
         content_detail: Optional[str] = None,
         # 如果内容类型为文件，则需要传入文件路径
         content_file: Optional[str] = None,
+        # 是否允许在该音频文件播放期间通过语音打断
+        allow_barge_in: bool = False,
     ):
         self.sentence_id = sentence_id
         self.sentence_type = sentence_type
         self.content_type = content_type
         self.content_detail = content_detail
         self.content_file = content_file
+        self.allow_barge_in = allow_barge_in

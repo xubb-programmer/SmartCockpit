@@ -40,6 +40,7 @@ from core.providers.tts.dto.dto import ContentType, TTSMessageDTO, SentenceType
 from config.logger import setup_logging, build_module_string, create_connection_logger
 from config.manage_api_client import DeviceNotFoundException, DeviceBindException, generate_and_save_chat_title
 from core.utils.prompt_manager import PromptManager
+from core.interaction_access import normalize_client_source
 from core.utils.voiceprint_provider import VoiceprintProvider
 from core.utils.util import get_system_error_response
 from core.utils import textUtils
@@ -106,6 +107,7 @@ class ConnectionHandler:
         # 客户端状态相关
         self.client_abort = False
         self.client_is_speaking = False
+        self.music_barge_in_active = False
         self.client_listen_mode = "auto"
         self.ignore_audio_until = 0.0
         self.suppressed_audio_packets = 0
@@ -197,6 +199,10 @@ class ConnectionHandler:
 
         # {"mcp":true} 表示启用MCP功能
         self.features = None
+        self.client_source = "web"
+        self.turn_acquired = False
+        self.turn_rejected = False
+        self.last_turn_busy_owner = None
 
         # 标记连接是否来自MQTT
         self.conn_from_mqtt_gateway = False
@@ -1470,11 +1476,74 @@ class ConnectionHandler:
 
     def clearSpeakStatus(self):
         self.client_is_speaking = False
+        self.music_barge_in_active = False
         tail_ms = max(0, int(self.config.get("echo_suppression_tail_ms", 800)))
         self.ignore_audio_until = time.monotonic() + tail_ms / 1000.0
         self.logger.bind(tag=TAG).debug(
             f"清除服务端讲话状态，继续抑制回声{tail_ms}毫秒"
         )
+
+    def set_client_source(self, value) -> str:
+        self.client_source = normalize_client_source(value)
+        return self.client_source
+
+    async def send_access_status(
+            self, status: str, message: str, owner: str = None
+    ) -> None:
+        if not self.websocket:
+            return
+        payload = {
+            "type": "access",
+            "status": status,
+            "message": message,
+            "mode": getattr(
+                getattr(self.server, "interaction_coordinator", None),
+                "mode",
+                "web",
+            ),
+        }
+        if owner:
+            payload["owner"] = owner
+        try:
+            await self.websocket.send(json.dumps(payload, ensure_ascii=False))
+        except Exception as exc:
+            self.logger.bind(tag=TAG).warning(f"发送语音入口状态失败: {exc}")
+
+    async def acquire_interaction_turn(
+            self, reason: str, notify_busy: bool = True
+    ) -> bool:
+        coordinator = getattr(self.server, "interaction_coordinator", None)
+        if coordinator is None:
+            self.turn_acquired = True
+            return True
+
+        acquired, lease = await coordinator.acquire(
+            self.session_id, self.client_source, reason
+        )
+        self.turn_acquired = acquired
+        self.last_turn_busy_owner = (
+            lease.source if lease and lease.session_id != self.session_id else None
+        )
+        if not acquired and notify_busy:
+            await self.send_access_status(
+                "busy",
+                "语音通道正在使用，请稍后再试",
+                owner=self.last_turn_busy_owner,
+            )
+        return acquired
+
+    async def touch_interaction_turn(self) -> None:
+        coordinator = getattr(self.server, "interaction_coordinator", None)
+        if coordinator and self.turn_acquired:
+            await coordinator.touch(self.session_id)
+
+    async def release_interaction_turn(self, reason: str) -> None:
+        coordinator = getattr(self.server, "interaction_coordinator", None)
+        if coordinator:
+            await coordinator.release(self.session_id, reason)
+        self.turn_acquired = False
+        self.turn_rejected = False
+        self.last_turn_busy_owner = None
 
     async def close(self, ws=None):
         """资源清理方法"""
@@ -1482,6 +1551,7 @@ class ConnectionHandler:
             return
         self._close_started = True
         try:
+            await self.release_interaction_turn("connection_close")
             # 清理 VAD 连接资源
             if (
                     hasattr(self, "vad")

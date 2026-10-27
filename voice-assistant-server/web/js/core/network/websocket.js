@@ -1,11 +1,17 @@
 // WebSocket消息处理模块
 import { getConfig, saveConnectionUrls } from '../../config/manager.js';
-import { uiController } from '../../ui/controller.js';
+import { uiController } from '../../ui/controller.js?v=0903a';
 import { log } from '../../utils/logger.js';
 import { getAudioPlayer } from '../audio/player.js';
 import { getAudioRecorder } from '../audio/recorder.js';
 import { executeMcpTool, getMcpTools, setWebSocket as setMcpWebSocket } from '../mcp/tools.js';
 import { webSocketConnect } from './ota-connector.js';
+
+const TTS_CAPTURE_TAIL_MS = 800;
+
+function isLoopbackPage() {
+    return ['127.0.0.1', 'localhost', '::1'].includes(window.location.hostname);
+}
 
 function getWebSocketErrorMessage(error, websocket) {
     if (error && error.message) {
@@ -33,6 +39,39 @@ export class WebSocketHandler {
         this.onChatMessage = null; // 新增：聊天消息回调
         this.currentSessionId = null;
         this.isRemoteSpeaking = false;
+        this.musicBargeInActive = false;
+        this.ttsCaptureResumeTimer = null;
+    }
+
+    suppressCaptureForTTS() {
+        if (this.ttsCaptureResumeTimer) {
+            clearTimeout(this.ttsCaptureResumeTimer);
+            this.ttsCaptureResumeTimer = null;
+        }
+        getAudioRecorder().setCaptureSuppressed(true, 'tts-playback');
+    }
+
+    scheduleCaptureResume(streamSequence, audioPlayer) {
+        if (this.ttsCaptureResumeTimer) {
+            clearTimeout(this.ttsCaptureResumeTimer);
+        }
+        this.ttsCaptureResumeTimer = setTimeout(() => {
+            this.ttsCaptureResumeTimer = null;
+            if (audioPlayer.streamSequence !== streamSequence || audioPlayer.streamActive) {
+                return;
+            }
+            getAudioRecorder().setCaptureSuppressed(false, 'tts-playback');
+            log(`[音频诊断][回声保护] TTS播放结束${TTS_CAPTURE_TAIL_MS}毫秒后恢复采集`, 'info');
+        }, TTS_CAPTURE_TAIL_MS);
+    }
+
+    clearTTSCaptureProtection() {
+        if (this.ttsCaptureResumeTimer) {
+            clearTimeout(this.ttsCaptureResumeTimer);
+            this.ttsCaptureResumeTimer = null;
+        }
+        this.musicBargeInActive = false;
+        getAudioRecorder().setCaptureSuppressed(false, 'tts-playback');
     }
 
     // 发送hello握手消息
@@ -93,7 +132,13 @@ export class WebSocketHandler {
             log(`[音频诊断][协议] 服务端输出格式=${audioParams.format || '未知'}，采样率=${audioParams.sample_rate || '未知'}Hz，声道=${audioParams.channels || '未知'}，帧时长=${audioParams.frame_duration || '未知'}ms`, 'info');
             log('连接成功', 'success');
             uiController.updateDialButton(true);
-            uiController.startAIChatSession();
+            const deferLocalHybridCapture = message.access_mode === 'hybrid' && isLoopbackPage();
+            uiController.startAIChatSession({
+                autoStartRecording: !deferLocalHybridCapture
+            });
+            if (deferLocalHybridCapture) {
+                log('[语音入口] hybrid本机页面保持待机，按录音按钮后使用Web麦克风', 'info');
+            }
         } else if (message.type === 'tts') {
             this.handleTTSMessage(message);
         } else if (message.type === 'audio') {
@@ -167,6 +212,14 @@ export class WebSocketHandler {
         } else if (message.type === 'vehicle_cmd') {
             log(`[车辆控制] 收到指令: 设备=${message.device}, 动作=${message.action}`, 'info');
             // 此消息为内部控制指令，仅记录日志，不在UI对话框中直接展示 JSON
+        } else if (message.type === 'access') {
+            const status = message.status || 'unknown';
+            const text = message.message || '语音通道状态已更新';
+            log(`[语音入口] 状态=${status}，模式=${message.mode || '未知'}，${text}`,
+                status === 'busy' || status === 'denied' ? 'warning' : 'info');
+            if ((status === 'busy' || status === 'denied') && this.onChatMessage) {
+                this.onChatMessage(text, false);
+            }
         } else {
             log(`未知消息类型: ${message.type}`, 'info');
             if (this.onChatMessage) {
@@ -181,10 +234,21 @@ export class WebSocketHandler {
             log('服务器开始发送语音', 'info');
             this.currentSessionId = message.session_id;
             this.isRemoteSpeaking = true;
+            this.musicBargeInActive = false;
+            this.suppressCaptureForTTS();
             getAudioPlayer().beginStream(message.session_id);
             if (this.onSessionStateChange) {
                 this.onSessionStateChange(true);
             }
+
+        } else if (message.state === 'music_start') {
+            this.musicBargeInActive = true;
+            if (this.ttsCaptureResumeTimer) {
+                clearTimeout(this.ttsCaptureResumeTimer);
+                this.ttsCaptureResumeTimer = null;
+            }
+            getAudioRecorder().setCaptureSuppressed(false, 'tts-playback');
+            log('[音频诊断][音乐打断] 音乐开始，已恢复麦克风上行', 'success');
 
         } else if (message.state === 'sentence_start') {
             log(`服务器发送语音段: ${message.text}`, 'info');
@@ -215,6 +279,7 @@ export class WebSocketHandler {
 
             // 句子结束时不清除动画，等待下一个句子或最终停止
         } else if (message.state === 'stop') {
+            this.musicBargeInActive = false;
             const audioPlayer = getAudioPlayer();
             const streamSequence = audioPlayer.streamSequence;
             log('[音频诊断][播放] 服务端音频传输已结束，等待浏览器播放队列排空', 'info');
@@ -223,6 +288,7 @@ export class WebSocketHandler {
                     return;
                 }
                 this.isRemoteSpeaking = false;
+                this.scheduleCaptureResume(streamSequence, audioPlayer);
                 if (this.onSessionStateChange) {
                     this.onSessionStateChange(false);
                 }
@@ -513,6 +579,7 @@ export class WebSocketHandler {
             }
 
             // 连接成功后，默认状态为聆听中
+            this.clearTTSCaptureProtection();
             this.isRemoteSpeaking = false;
             if (this.onSessionStateChange) {
                 this.onSessionStateChange(false);
@@ -532,6 +599,7 @@ export class WebSocketHandler {
             }
 
             const audioRecorder = getAudioRecorder();
+            this.clearTTSCaptureProtection();
             audioRecorder.stop();
             getAudioPlayer().clearAllAudio('WebSocket已断开');
             this.isRemoteSpeaking = false;
@@ -573,6 +641,7 @@ export class WebSocketHandler {
 
         this.websocket.close();
         const audioRecorder = getAudioRecorder();
+        this.clearTTSCaptureProtection();
         audioRecorder.stop();
         getAudioPlayer().clearAllAudio('用户断开连接');
 

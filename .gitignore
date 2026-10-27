@@ -22,16 +22,21 @@ models/*.rknn
 models/**/*.rkllm
 models/**/*.rknn
 
-# ── RK3588 离线迁移包（按要求纳入私有 Git/LFS）───────────────
-!output/rk3588-migration-kit/**/*.tar.gz
-!output/rk3588-migration-kit/**/Miniconda3-*.sh
+# ── RK3588 离线部署包（纳入 Git LFS）─────────────────────────
+!output/rk3588-deploy/smartcockpit-rk3588-install.tar.gz
+
+# ── 本地检查材料与部署包分卷副本 ────────────────────────────
+/tmp/
+/output/.inspect-verify.sh
+/output/.rk3588-source-compare-*/
+/output/rk3588-deploy.zip
+/output/rk3588-deploy.z[0-9][0-9]
 
 # ── 临时文件 ─────────────────────────────────────────────────
 voice-assistant-server/tmp/
 *.log
 *.pid
 *.cache
-!output/rk3588-migration-kit/**/*.cache
 
 # ── 运行时覆盖配置（用户本地配置，不入库）─────────────────────
 voice-assistant-server/data/.config.yaml

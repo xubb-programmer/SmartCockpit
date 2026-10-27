@@ -25,7 +25,7 @@ class PingMessageHandler(TextMessageHandler):
         """
         # 检查是否启用了WebSocket心跳功能
         enable_websocket_ping = conn.config.get("enable_websocket_ping", False)
-        if not enable_websocket_ping:
+        if not enable_websocket_ping and getattr(conn, "client_source", "web") != "headless":
             conn.logger.debug(f"WebSocket心跳功能未启用，忽略PING消息")
             return
 

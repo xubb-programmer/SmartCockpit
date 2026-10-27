@@ -60,6 +60,8 @@ _STATE_VALUE_CN: Dict[str, str] = {
 
 # ── 状态键中文映射 ────────────────────────────────────────────────────────────
 _STATE_KEY_CN: Dict[str, str] = {
+    "azimuth": "方位角",
+    "pitch": "俯仰角",
     "power": "电源",
     "cover": "顶盖",
     "cross": "十字丝",
@@ -175,6 +177,8 @@ _EXT_STATE_VALUE_CN: Dict[str, str] = {
 }
 
 _EXT_STATE_KEY_CN: Dict[str, str] = {
+    "azimuth": "方位角",
+    "pitch": "俯仰角",
     "power": "电源",
     "cross": "十字丝",
     "enhance": "增强",

@@ -176,7 +176,7 @@ def test_start_scripts_use_official_single_instance_multimodal_architecture():
         PROJECT_ROOT / "voice-assistant-server" / "scripts" / "deploy"
         / "voice-assistant.service"
     ).read_text(encoding="utf-8")
-    assert 'MODEL_SIZE="${VOICE_ASSISTANT_MODEL:-qwen3.5-0.8b}"' in deploy_text
+    assert 'MODEL_SIZE="${VOICE_ASSISTANT_MODEL:-qwen3-4b}"' in deploy_text
     assert "Environment=VOICE_ASSISTANT_MODEL=qwen3-4b" in service_text
     assert "VOICE_ASSISTANT_VISION_MODEL" not in service_text
     assert "VISION_MODEL_SIZE" not in deploy_text
@@ -295,9 +295,20 @@ def test_vehicle_prompt_uses_compact_protocol_and_stays_small():
     assert len(prompt) < 3000
     for token in ("@C|target|action", "@S|target", "@V|问题", "@M|歌名", "@D|all", "@X"):
         assert token in prompt
-    for action in ("focus_out", "brightness_up", "enhance_on", "scan_circle", "recon_start"):
+    for action in (
+        "focus_out", "brightness_up", "enhance_on", "scan_circle",
+        "digital_guide", "recon_start",
+    ):
         assert action in prompt
     assert "@C|vis_cam|digital_zoom|zoom_level=4" in prompt
+    assert "顺时针严格用direction=cw" in prompt
+    assert "逆时针严格用direction=ccw" in prompt
+    assert "@C|gimbal|scan_circle|direction=cw" in prompt
+    assert "@C|gimbal|scan_circle|direction=ccw" in prompt
+    assert "@C|gimbal|digital_guide|azimuth=82.67,pitch=10.5" in prompt
+    assert "稳台扇扫=>当前车型不支持该功能" in prompt
+    assert "未列出的动作不得近似或替换为已有动作" in prompt
+    assert "scan_circle仅用于用户明确要求周扫或全周扫描" in prompt
     assert "每个动作单独一行@C" in prompt
 
 

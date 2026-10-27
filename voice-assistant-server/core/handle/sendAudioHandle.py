@@ -318,16 +318,25 @@ async def send_tts_message(conn: "ConnectionHandler", state, text=None):
         message["text"] = textUtils.remove_unspoken_symbols(textUtils.check_emoji(text))
 
     if state == "start":
+        await conn.touch_interaction_turn()
         conn.tts_tx_packets = 0
         conn.tts_tx_bytes = 0
         conn.client_is_speaking = True
+        conn.music_barge_in_active = False
         conn.ignore_audio_until = 0.0
         conn.suppressed_audio_packets = 0
         conn.reset_audio_states()
         conn.logger.bind(tag=TAG).info("[音频诊断][下行] TTS流开始")
 
+    if state == "music_start":
+        conn.music_barge_in_active = True
+        conn.logger.bind(tag=TAG).info(
+            "[音频诊断][音乐打断] 音乐开始，已允许麦克风语音打断"
+        )
+
     # TTS播放结束
     if state == "stop":
+        conn.music_barge_in_active = False
         # 保存当前的 sentence_id，用于后续判断是否是当前轮次
         current_sentence_id = conn.sentence_id
         # 播放提示音
@@ -356,7 +365,11 @@ async def send_tts_message(conn: "ConnectionHandler", state, text=None):
         )
 
     # 发送消息到客户端
-    await conn.websocket.send(json.dumps(message))
+    try:
+        await conn.websocket.send(json.dumps(message))
+    finally:
+        if state == "stop":
+            await conn.release_interaction_turn("tts_complete")
 
 
 async def send_stt_message(conn: "ConnectionHandler", text):
