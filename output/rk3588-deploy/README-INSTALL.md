@@ -69,6 +69,13 @@ chmod +x install-smartcockpit-rk3588.sh
 ./install-smartcockpit-rk3588.sh
 ```
 
+如果 `df -hT /tmp` 显示 `tmpfs`，请将解压目录放在磁盘上，避免占用模型所需内存：
+
+```bash
+mkdir -p "$HOME/rk3588-install-tmp"
+TMPDIR="$HOME/rk3588-install-tmp" ./install-smartcockpit-rk3588.sh
+```
+
 安装过程中按提示选择：
 
 1. **完整安装/完整替换**：安装 Conda 环境、离线模型、源码和 systemd 服务。

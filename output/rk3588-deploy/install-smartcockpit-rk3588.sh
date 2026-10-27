@@ -5,6 +5,9 @@
 
 set -Eeuo pipefail
 
+# Debian 普通用户的 PATH 可能不包含系统管理命令目录。
+export PATH="${PATH}:/usr/sbin:/sbin"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PACKAGE_NAME="smartcockpit-rk3588-install.tar.gz"
 PACKAGE_FILE="${SCRIPT_DIR}/${PACKAGE_NAME}"
@@ -210,16 +213,21 @@ while true; do
     esac
 done
 
-TEMP_FREE_KIB="$(df -Pk /tmp | awk 'NR==2 {print $4}')"
+TEMP_ROOT="${TMPDIR:-/tmp}"
+if [[ ! -d "${TEMP_ROOT}" || ! -w "${TEMP_ROOT}" ]]; then
+    fail "临时目录不存在或不可写: ${TEMP_ROOT}"
+    exit 1
+fi
+TEMP_FREE_KIB="$(df -Pk "${TEMP_ROOT}" | awk 'NR==2 {print $4}')"
 TEMP_REQUIRED_GIB=1
 [[ "${MODE}" == '1' ]] && TEMP_REQUIRED_GIB=8
 if (( TEMP_FREE_KIB < TEMP_REQUIRED_GIB * 1024 * 1024 )); then
-    fail "/tmp 所在分区空间不足，解包至少需要 ${TEMP_REQUIRED_GIB} GiB。"
+    fail "${TEMP_ROOT} 所在分区空间不足，解包至少需要 ${TEMP_REQUIRED_GIB} GiB。"
     exit 1
 fi
 
 CURRENT_STEP='解压离线部署包'
-WORK_ROOT="$(mktemp -d /tmp/smartcockpit-rk3588-installer.XXXXXX)"
+WORK_ROOT="$(mktemp -d "${TEMP_ROOT%/}/smartcockpit-rk3588-installer.XXXXXX")"
 case "${MODE}" in
     1)
         tar -xzf "${PACKAGE_FILE}" -C "${WORK_ROOT}"
