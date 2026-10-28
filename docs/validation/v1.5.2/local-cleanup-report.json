@@ -1,0 +1,25 @@
+{
+  "release_version": "v1.5.2",
+  "removed": [
+    {
+      "logical_bytes": 240830833,
+      "path": "temporary/smartcockpit-release-20261028-yupl3a6q"
+    },
+    {
+      "logical_bytes": 241122070,
+      "path": "temporary/wakeup-fix-20261028-8ecbjr22"
+    },
+    {
+      "logical_bytes": 350630,
+      "path": "temporary/wakeup-baseline-fl5rm0wz"
+    },
+    {
+      "path": "output/rk3588-deploy/smartcockpit-rk3588-install.tar.gz",
+      "logical_bytes": 6878168361
+    },
+    {
+      "path": "output/rk3588-deploy/smartcockpit-rk3588-install.tar.gz.new",
+      "logical_bytes": 6878168357
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "source_commit": "9720ac873f4c940f3eaeb8c07a247fb24e614052",
+  "package_sha256": "07eafa4bb1b22131fd9fcc85b90dd2e42785365c629a6b339981fed7f12d575a",
+  "package_bytes": 6878168357,
+  "source_counts": {
+    "rknn-server": 33,
+    "voice-assistant-server": 376
+  },
+  "source_manifest_entries": 408,
+  "site_snapshots": {
+    "voice-assistant-server/data/.config.yaml": "85f8995a43ee4c608781e7efbadf6aab1e95277eaca40c3073e9d97d968b51d2"
+  },
+  "outer_checksum_entries": 18,
+  "old_payloads_verified": 18,
+  "new_source_files": [],
+  "build_seconds": 232.2
+}

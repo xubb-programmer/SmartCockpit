@@ -2,28 +2,38 @@
 
 ## 1. 最终材料
 
-部署目录只包含三个文件：
+v1.5.2 部署目录保留最新 4 个分卷及安装器、说明：
 
 ```text
 rk3588-deploy/
-├── smartcockpit-rk3588-install.tar.gz  # 完整离线环境、模型和源码
-├── install-smartcockpit-rk3588.sh      # RK3588 板端交互安装脚本
-└── README-INSTALL.md                   # 本说明
+├── smartcockpit-rk3588-install.tar.gz.part01
+├── smartcockpit-rk3588-install.tar.gz.part02
+├── smartcockpit-rk3588-install.tar.gz.part03
+├── smartcockpit-rk3588-install.tar.gz.part04
+├── install-smartcockpit-rk3588.sh
+└── README-INSTALL.md
 ```
 
-不要手工解压 `smartcockpit-rk3588-install.tar.gz`。安装脚本会先校验 SHA-256，
-再解压到临时目录，安装完成后自动清理。
+每卷不超过 1,800,000,000 字节，符合 GitHub LFS 单文件限制。复制全部 6 个文件到同一目录后运行安装器，
+安装器按顺序合并数据、校验完整归档的 SHA-256 并直接解包，无需手动合并。
+Git 检出后先运行 `git lfs pull`，确保分卷是实际文件。
 
-本版本离线包 SHA-256：
+```bash
+bash install-smartcockpit-rk3588.sh --verify-package  # 只校验，不安装
+bash install-smartcockpit-rk3588.sh                   # 交互安装
+```
+
+完整归档 SHA-256：
 
 ```text
-d4a077abb1b361d2685a24753825b4285de9b8c26ca5b3609f599ea182848c34
+07eafa4bb1b22131fd9fcc85b90dd2e42785365c629a6b339981fed7f12d575a
 ```
 
-2026-10-28 重建，归档大小为 6,878,144,296 字节，对应源码提交
-`f95b6cb6c2169018db58e8260f2b1d2f67423966`。包内 RKLLM 服务 30 个文件、
-语音服务 372 个文件；401 个受控文件按提交内容校验，另保留 1 份默认现场配置快照。
-包含低延时唤醒、短就绪音、8 秒免唤醒续说、到期结束提示和异常恢复。
+2026-10-28 重建，归档大小为 6,878,168,357 字节，对应源码提交
+`9720ac873f4c940f3eaeb8c07a247fb24e614052`。包内 RKLLM 服务 33 个文件、
+语音服务 376 个文件；408 个受控文件按提交内容校验，另保留 1 份默认现场配置快照。
+包含 80 毫秒短就绪音、本地 Silero 防回灌、8 秒免唤醒续说、音乐中唤醒停歌和按会话取消。
+完整语音回归 163 项通过，唤醒后就绪耗时实测中位数约 196 毫秒。
 完整的范围与验证结果见仓库 `docs/部署包与源码一致性核验.md`。
 
 包内 `manifests/source-version.json` 记录源码提交，`source-files.sha256` 记录逐文件校验值。
@@ -179,3 +189,13 @@ systemctl is-active voice-assistant.service
 - `/opt/jw/downloads/` 独立于源码更新，更新时不会被覆盖。
 - 车辆控制依赖对应硬件和控制程序；无车辆硬件时不要选择安装车辆控制。
 - 如果 NPU 驱动和已验证基线不同，以 RKLLM 实际加载和推理测试为准。
+
+
+## 分卷校验
+
+| 分卷 | 字节数 | SHA-256 |
+|---|---:|---|
+| `smartcockpit-rk3588-install.tar.gz.part01` | 1,800,000,000 | `d0d30f25303f873410025028fd616f69315e18396ca9508870981023d9a8fa76` |
+| `smartcockpit-rk3588-install.tar.gz.part02` | 1,800,000,000 | `804a40998ee2448faef7abc27bfb30a72f2b9aeef5ce9f1dfd4e98bd9272d32c` |
+| `smartcockpit-rk3588-install.tar.gz.part03` | 1,800,000,000 | `5d0be9c59f1a1a9d2c780883916854ee8c213e39ebb11cefcd9c271e14c6c059` |
+| `smartcockpit-rk3588-install.tar.gz.part04` | 1,478,168,357 | `e120303e66a130876920cd0358f1c6886ea2f78a4268d406d01063bfad0d9a19` |

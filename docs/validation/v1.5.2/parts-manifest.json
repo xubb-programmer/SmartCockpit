@@ -1,0 +1,28 @@
+{
+  "release_version": "v1.5.2",
+  "package_sha256": "07eafa4bb1b22131fd9fcc85b90dd2e42785365c629a6b339981fed7f12d575a",
+  "package_bytes": 6878168357,
+  "part_max_bytes": 1800000000,
+  "parts": [
+    {
+      "name": "smartcockpit-rk3588-install.tar.gz.part01",
+      "bytes": 1800000000,
+      "sha256": "d0d30f25303f873410025028fd616f69315e18396ca9508870981023d9a8fa76"
+    },
+    {
+      "name": "smartcockpit-rk3588-install.tar.gz.part02",
+      "bytes": 1800000000,
+      "sha256": "804a40998ee2448faef7abc27bfb30a72f2b9aeef5ce9f1dfd4e98bd9272d32c"
+    },
+    {
+      "name": "smartcockpit-rk3588-install.tar.gz.part03",
+      "bytes": 1800000000,
+      "sha256": "5d0be9c59f1a1a9d2c780883916854ee8c213e39ebb11cefcd9c271e14c6c059"
+    },
+    {
+      "name": "smartcockpit-rk3588-install.tar.gz.part04",
+      "bytes": 1478168357,
+      "sha256": "e120303e66a130876920cd0358f1c6886ea2f78a4268d406d01063bfad0d9a19"
+    }
+  ]
+}

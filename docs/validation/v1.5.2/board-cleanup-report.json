@@ -1,0 +1,49 @@
+{
+  "release_version": "v1.5.2",
+  "removed": [
+    {
+      "path": "/home/cat/echo-candidate-backup-20261028",
+      "logical_bytes": 134861
+    },
+    {
+      "path": "/home/cat/echo-fast-candidate-backup-20261028",
+      "logical_bytes": 164101
+    },
+    {
+      "path": "/home/cat/music-candidate-backup-20261028",
+      "logical_bytes": 185965
+    },
+    {
+      "path": "/home/cat/music-candidate-v2-backup-20261028",
+      "logical_bytes": 197562
+    },
+    {
+      "path": "/home/cat/source-sync-backup-f95b6cb-1750909189555906785",
+      "logical_bytes": 2753486
+    },
+    {
+      "path": "/home/cat/voice-release-f95b6cb",
+      "logical_bytes": 7055351563
+    },
+    {
+      "path": "/home/cat/voice-wakeup-backup-20261028-1750908007006635636",
+      "logical_bytes": 143035
+    },
+    {
+      "path": "/home/cat/wakeup-fix-20261028",
+      "logical_bytes": 8116237284
+    },
+    {
+      "path": "/home/cat/wakeup-fix-backup-4cee5d4",
+      "logical_bytes": 242252
+    }
+  ],
+  "retained_parts": [
+    "/home/cat/rk3588-deploy/smartcockpit-rk3588-install.tar.gz.part01",
+    "/home/cat/rk3588-deploy/smartcockpit-rk3588-install.tar.gz.part02",
+    "/home/cat/rk3588-deploy/smartcockpit-rk3588-install.tar.gz.part03",
+    "/home/cat/rk3588-deploy/smartcockpit-rk3588-install.tar.gz.part04"
+  ],
+  "retained_release_evidence": "/home/cat/smartcockpit-release-v1.5.2",
+  "removed_logical_bytes": 15175410109
+}

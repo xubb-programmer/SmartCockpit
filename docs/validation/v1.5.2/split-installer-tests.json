@@ -1,0 +1,8 @@
+{
+  "complete_parts_verify_without_install": true,
+  "missing_part_rejected": true,
+  "corrupt_part_rejected": true,
+  "mode_2_extracts_source_provenance": true,
+  "mode_3_extracts_source_provenance": true,
+  "complete_archive_compatibility": true
+}

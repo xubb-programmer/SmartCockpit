@@ -1,0 +1,16 @@
+{
+  "release_version": "v1.5.2",
+  "format_version": 1,
+  "source_commit": "9720ac873f4c940f3eaeb8c07a247fb24e614052",
+  "release_date": "2026-10-28",
+  "source_files": 408,
+  "archive_file_counts": {
+    "rknn-server": 33,
+    "voice-assistant-server": 376
+  },
+  "source_manifest_sha256": "0a1bef4f4c26a2362a5787718c883eb29607164f912fb638549f8f6b83cf2385",
+  "site_configuration_snapshots": {
+    "voice-assistant-server/data/.config.yaml": "85f8995a43ee4c608781e7efbadf6aab1e95277eaca40c3073e9d97d968b51d2"
+  },
+  "configuration_policy": "Preserve existing site configuration during source-only updates."
+}
