@@ -42,8 +42,9 @@ class HeadlessClientTests(unittest.IsolatedAsyncioTestCase):
             patch("clients.headless_voice_client.SherpaKeywordDetector"),
             patch("clients.headless_voice_client.log"),
         ):
-            self.client = HeadlessVoiceClient({"voice_access": {"mode": "hybrid"}})
+            self.client = HeadlessVoiceClient({"voice_access": {"mode": "hybrid", "headless": {"speech_vad_enabled": False}}})
         self.client.echo_tail = 0
+        self.client.tone_echo_tail = 0
         self.client.reply_echo_tail = 0
         self.client.connected.set()
         self.client.websocket = types.SimpleNamespace(send=AsyncMock(), close=AsyncMock())
@@ -79,6 +80,59 @@ class HeadlessClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.json_messages(), [
             {"type": "listen", "state": "start", "mode": "manual"},
         ])
+
+    async def test_music_start_enables_kws_without_uploading_music(self):
+        self.client.state = STATE_PLAYING
+        await self.client._handle_tts({"state": "music_start"})
+        self.client.kws.accept_pcm.return_value = ""
+        await self.client._stream_music_audio(b"\x00\x10" * 640)
+        self.assertTrue(self.client._music_active)
+        self.client.kws.accept_pcm.assert_called_once()
+        self.client.websocket.send.assert_not_awaited()
+
+    async def test_music_wake_stops_playback_then_starts_one_new_recording(self):
+        self.client.state = STATE_PLAYING
+        await self.client._handle_tts({"state": "music_start"})
+        self.client.kws.accept_pcm.return_value = "你好小江"
+        async def acknowledge(raw):
+            if isinstance(raw, str) and json.loads(raw).get("type") == "abort":
+                self.assertEqual(self.client.state, "reserving")
+                await self.client._handle_message(b"late old music")
+                await self.client._handle_tts({"state": "stop"})
+        self.client.websocket.send.side_effect = acknowledge
+        await self.client._stream_music_audio(b"\x00\x10" * 640)
+        self.assertEqual(self.client.state, STATE_LISTENING)
+        self.assertFalse(self.client._music_active)
+        self.client.playback.stop_stream.assert_called_with(False)
+        self.client.playback.write.assert_not_called()
+        self.client.playback.play_cue.assert_called_once_with("ready")
+        self.assertEqual([m.get("type") for m in self.json_messages()], ["abort", "listen"])
+        self.assertIsNone(self.client._completion_task)
+
+    async def test_music_flag_does_not_open_idle_or_normal_speech(self):
+        await self.client._handle_tts({"state": "music_start"})
+        self.assertFalse(self.client._music_active)
+        self.client.state = STATE_PROCESSING
+        await self.client._handle_tts({"state": "start"})
+        self.assertFalse(self.client._music_active)
+
+    async def test_music_end_uses_normal_followup(self):
+        self.client.state = STATE_PLAYING
+        await self.client._handle_tts({"state": "music_start"})
+        await self.client._handle_tts({"state": "stop"})
+        await self.client._completion_task
+        self.assertFalse(self.client._music_active)
+        self.assertEqual(self.client.state, STATE_FOLLOWUP)
+
+    async def test_music_interrupt_send_failure_closes_connection(self):
+        self.client.state = STATE_PLAYING
+        self.client._music_active = True
+        self.client.kws.accept_pcm.return_value = "你好小江"
+        self.client.websocket.send.side_effect = ConnectionError("offline")
+        await self.client._stream_music_audio(b"\0" * 1280)
+        self.assertEqual(self.client.state, STATE_WAIT_WAKE)
+        self.client.websocket.close.assert_awaited_once()
+        self.client.playback.play_cue.assert_called_once_with("error")
 
     async def test_voice_ack_remains_configurable(self):
         self.client.acknowledgement_mode = "voice"
@@ -296,6 +350,39 @@ class HeadlessClientTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(await self.client._encode_and_send(b"\0" * self.client.frame_bytes))
         self.assertEqual(self.client.state, STATE_WAIT_WAKE)
         self.client.playback.play_cue.assert_called_once_with("error")
+
+    async def test_non_speech_background_cannot_reacquire_followup(self):
+        await self.followup()
+        self.client.speech_vad = types.SimpleNamespace(probability=lambda _: .05)
+        for _ in range(10):
+            await self.client._stream_followup_audio(b"\x00\x10" * 640)
+        self.assertEqual(self.client.state, STATE_FOLLOWUP)
+        self.client._acquire_turn.assert_not_awaited()
+        self.assertFalse(self.client.speech_endpoint.heard_voice)
+
+    async def test_lingering_reply_voice_does_not_open_followup(self):
+        self.client.speech_vad = types.SimpleNamespace(probability=lambda _: .95)
+        await self.client._speech_activity(b"\x00\x10" * 640)
+        await self.followup()
+        self.assertEqual(self.client.state, STATE_WAIT_WAKE)
+        self.client.playback.play_cue.assert_called_once_with("sleep")
+
+    async def test_fresh_quiet_gap_allows_followup(self):
+        self.client.speech_vad = types.SimpleNamespace(probability=lambda _: .05)
+        await self.client._speech_activity(b"\0" * 1280)
+        self.client._vad_quiet_since -= .3
+        await self.followup()
+        self.assertEqual(self.client.state, STATE_FOLLOWUP)
+
+    async def test_playback_drain_counts_toward_server_echo_wait(self):
+        self.client._tts_stopped_at = 100
+        self.client.reply_echo_tail = .8
+        self.client.echo_tail = .2
+        with (patch("clients.headless_voice_client.time", types.SimpleNamespace(monotonic=lambda: 100.6)),
+              patch("clients.headless_voice_client.asyncio.sleep", new_callable=AsyncMock) as sleep):
+            await self.client._after_reply(self.client._epoch)
+        self.assertAlmostEqual(sleep.await_args_list[0].args[0], .2)
+        self.assertEqual(self.client.state, STATE_FOLLOWUP)
 
     async def test_goodbye_socket_close_finishes_sleep_cue_once(self):
         client = self.client

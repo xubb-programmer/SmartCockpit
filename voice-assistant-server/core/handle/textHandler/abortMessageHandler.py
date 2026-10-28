@@ -13,4 +13,8 @@ class AbortTextMessageHandler(TextMessageHandler):
         return TextMessageType.ABORT
 
     async def handle(self, conn, msg_json: Dict[str, Any]) -> None:
-        await handleAbortMessage(conn)
+        await handleAbortMessage(
+            conn,
+            music_only=(msg_json.get("reason") == "wake_word"
+                        and getattr(conn, "client_source", "web") == "headless"),
+        )

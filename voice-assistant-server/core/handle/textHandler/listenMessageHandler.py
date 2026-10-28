@@ -53,6 +53,13 @@ class ListenTextMessageHandler(TextMessageHandler):
             # 设备从播放模式切回录音模式,清除所有音频状态和缓冲区
             await _wait_audio_queue_drained(conn, "listen/start")
             conn.reset_audio_states()
+            if (getattr(conn, "client_source", "web") == "headless"
+                    and getattr(conn, "headless_music_interrupted", False)
+                    and conn.client_listen_mode == "manual"):
+                # Client confirmed stop, discarded playback and played its ready
+                # cue. The old song's server tail must not swallow the new onset.
+                conn.ignore_audio_until = 0.0
+                conn.headless_music_interrupted = False
             conn.logger.bind(tag=TAG).info(
                 f"[音频诊断][协议] 收到listen/start，模式={conn.client_listen_mode}"
             )

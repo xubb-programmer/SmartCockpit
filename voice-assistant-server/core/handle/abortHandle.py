@@ -1,5 +1,6 @@
 import json
 import asyncio
+import uuid
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -42,7 +43,7 @@ async def _abort_inference_providers(conn: "ConnectionHandler"):
             )
 
 
-async def handleAbortMessage(conn: "ConnectionHandler"):
+async def handleAbortMessage(conn: "ConnectionHandler", music_only=False):
     # ASR/VAD 可能在相邻事件中重复触发打断。串行化整个取消流程，
     # 避免第二个延迟到达的 /rkllm_abort 误取消已经开始的新指令。
     abort_lock = getattr(conn, "_abort_lock", None)
@@ -56,13 +57,23 @@ async def handleAbortMessage(conn: "ConnectionHandler"):
             return
 
         conn.logger.bind(tag=TAG).info("收到打断指令")
+        headless_music = (
+            (getattr(conn, "music_barge_in_active", False) or music_only)
+            and getattr(conn, "client_source", "web") == "headless"
+        )
+        if headless_music:
+            # Invalidate the old song's pending LAST/control messages before the
+            # client starts a new manual recording on this same connection.
+            conn.sentence_id = uuid.uuid4().hex
+            conn.headless_music_interrupted = True
         # 先设置本地标记并停止 TTS，再通知推理后端停止输出并安全收尾。
         conn.client_abort = True
         conn.clear_queues()
+        conn.clearSpeakStatus()
         # 打断客户端说话状态
         await conn.websocket.send(
             json.dumps({"type": "tts", "state": "stop", "session_id": conn.session_id})
         )
-        conn.clearSpeakStatus()
-        await _abort_inference_providers(conn)
+        if not headless_music:
+            await _abort_inference_providers(conn)
         conn.logger.bind(tag=TAG).debug("打断指令处理完成")

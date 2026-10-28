@@ -1,0 +1,127 @@
+{
+  "release_version": "v1.5.2",
+  "client_date": "2026-10-28",
+  "board": "cat@192.168.0.201",
+  "voice_regression_tests": 163,
+  "model_cancellation_tests": 10,
+  "rkllm_contract_checks": 14,
+  "wake_latency": {
+    "baseline_100ms_tone_200ms_tail": {
+      "samples_ms": [
+        352.8,
+        340.3,
+        344.6
+      ],
+      "median_ms": 344.6
+    },
+    "candidate_80ms_tone_80ms_tail": {
+      "samples_ms": [
+        215.7,
+        184.5,
+        196.2
+      ],
+      "median_ms": 196.2
+    },
+    "scope": "keyword detection callback to listen/start; physical speaker, real WebSocket access, no ASR or model inference"
+  },
+  "physical_echo_baseline": [
+    {
+      "round": 1,
+      "physical_speaker_and_microphone": true,
+      "counts": {
+        "acquire": 2,
+        "start": 2,
+        "stop": 1
+      },
+      "states": [
+        "listening",
+        "playing",
+        "draining",
+        "followup",
+        "reserving",
+        "listening",
+        "processing"
+      ],
+      "speech_probability_at_end": null,
+      "passed": false
+    }
+  ],
+  "physical_echo_release": [
+    {
+      "round": 1,
+      "physical_speaker_and_microphone": true,
+      "counts": {
+        "acquire": 1,
+        "start": 1,
+        "stop": 0
+      },
+      "states": [
+        "listening",
+        "playing",
+        "draining",
+        "followup",
+        "draining",
+        "wait_wake"
+      ],
+      "speech_probability_at_end": 0.08233219385147095,
+      "passed": true
+    },
+    {
+      "round": 2,
+      "physical_speaker_and_microphone": true,
+      "counts": {
+        "acquire": 1,
+        "start": 1,
+        "stop": 0
+      },
+      "states": [
+        "listening",
+        "playing",
+        "draining",
+        "followup",
+        "draining",
+        "wait_wake"
+      ],
+      "speech_probability_at_end": 3.197789192199707e-05,
+      "passed": true
+    }
+  ],
+  "music_loop": {
+    "music_not_uploaded": true,
+    "real_kws_interrupted_music": true,
+    "new_recording_and_reply_after_interrupt": true,
+    "natural_music_end_recovers": true,
+    "counts": {
+      "start": 3,
+      "stop": 1,
+      "abort": 1,
+      "audio": 20
+    },
+    "final_state": "wait_wake"
+  },
+  "model_cancellation": {
+    "old_close_did_not_abort": true,
+    "output_continued_after_old_close": true,
+    "own_close_cancelled": true,
+    "closed_session_http": 409,
+    "new_session_http": 200,
+    "new_session_has_output": true,
+    "stream_errors": []
+  },
+  "real_service_music": {
+    "music_start_received": true,
+    "wake_sent_one_abort": true,
+    "stop_confirmation_received": true,
+    "next_question_recognized": true,
+    "received_audio_frames": 176,
+    "final_state": "wait_wake",
+    "synthetic_capture_and_muted_playback": true
+  },
+  "scope_notes": [
+    "The physical echo test used the real speaker and microphone with an isolated WebSocket protocol server.",
+    "The music loop used synthetic music mixed with speech through isolated PulseAudio devices and real KWS/Opus/WebSocket.",
+    "The real-service music test used synthetic continuous microphone input and muted playback with real ASR/RKLLM/TTS.",
+    "Latency is measured from the keyword detection callback to listen/start, not full question answering.",
+    "RKLLM uses cooperative cancellation and waits for the synchronous runtime to finish safely."
+  ]
+}

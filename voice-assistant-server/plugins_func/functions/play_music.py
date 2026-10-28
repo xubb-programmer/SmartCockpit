@@ -45,7 +45,6 @@ def play_music(conn: "ConnectionHandler", song_name: str):
         # ── 停止播放 ──────────────────────────────────────────
         if song_name == "stop":
             conn.logger.bind(tag=TAG).info("停止音乐播放")
-            conn.client_abort = True
             conn.clear_queues()
             return ActionResponse(
                 action=Action.RESPONSE,
@@ -56,7 +55,6 @@ def play_music(conn: "ConnectionHandler", song_name: str):
         # ── 暂停（当前暂无断点续播，停止后告知用户）──────────────
         if song_name == "pause":
             conn.logger.bind(tag=TAG).info("暂停音乐（等同停止，暂无续播功能）")
-            conn.client_abort = True
             conn.clear_queues()
             return ActionResponse(
                 action=Action.RESPONSE,

@@ -25,6 +25,7 @@ from clients.headless_audio import (
     resolve_audio_device,
 )
 from clients.headless_kws import SherpaKeywordDetector
+from clients.headless_vad import PcmSpeechDetector
 from core.auth import AuthManager
 from core.interaction_access import get_access_config, get_access_mode
 
@@ -135,6 +136,9 @@ class HeadlessVoiceClient:
         self.echo_tail = float(
             headless_config.get("echo_suppression_tail_ms", 200)
         ) / 1000.0
+        self.tone_echo_tail = min(self.echo_tail, max(0.0, float(
+            headless_config.get("tone_echo_suppression_tail_ms", 80)
+        ) / 1000.0))
         # 服务端 TTS stop 后也有抑制窗口，续说必须等两侧均可接收。
         self.reply_echo_tail = max(
             self.echo_tail, float(config.get("echo_suppression_tail_ms", 800)) / 1000
@@ -163,6 +167,23 @@ class HeadlessVoiceClient:
                 headless_config.get("speech_end_seconds", 0.5)
             ),
         )
+        self.speech_vad = None
+        self._vad_probability = 0.0
+        self._vad_quiet_since = None
+        self._vad_checked_at = 0.0
+        self._vad_diagnostic_at = 0.0
+        self.vad_threshold = float(headless_config.get("speech_vad_threshold", 0.6))
+        self.vad_threshold_low = float(headless_config.get("speech_vad_threshold_low", 0.2))
+        if headless_config.get("speech_vad_enabled", True):
+            if self.sample_rate != 16000:
+                raise ValueError("本地 Silero 语音检测要求 sample_rate=16000")
+            vad_config = config.get("VAD", {}).get("SileroVAD", {})
+            model_dir = resolve_project_path(vad_config.get("model_dir", "models/snakers4_silero-vad"))
+            self.speech_vad = PcmSpeechDetector(model_dir / "src/silero_vad/data/silero_vad.onnx")
+            self.speech_endpoint.speech_start_hold_seconds = max(
+                self.speech_endpoint.speech_start_hold_seconds,
+                float(headless_config.get("speech_vad_start_hold_ms", 120)) / 1000,
+            )
         self.capture_queue_seconds = int(
             headless_config.get("capture_queue_seconds", 3)
         )
@@ -244,6 +265,8 @@ class HeadlessVoiceClient:
         self.stopping = asyncio.Event()
         self._send_lock = asyncio.Lock()
         self._access_future = None
+        self._music_active = False
+        self._music_abort_future = None
         self._listen_started_at = 0.0
         self._processing_started_at = 0.0
         self._last_audio_diagnostic_at = 0.0
@@ -253,6 +276,7 @@ class HeadlessVoiceClient:
         self._followup_started_at = 0.0
         self._response_activity_at = 0.0
         self._first_audio_at = 0.0
+        self._tts_stopped_at = 0.0
         self._wake_detected_at = 0.0
         self._exit_requested = False
         self._preroll = deque(maxlen=max(2, 320 // self.capture_chunk_ms))
@@ -260,9 +284,10 @@ class HeadlessVoiceClient:
         log("INFO", f"语音入口模式: {self.mode}")
         log("INFO", f"音频后端: {self.audio_backend}")
         log("INFO", f"采集分块: {self.capture_chunk_ms}毫秒")
+        log("INFO", f"本地人声检测: {'Silero，播报后需安静间隔' if self.speech_vad else '仅能量检测'}")
         log("INFO", f"麦克风设备: {input_device}")
         log("INFO", f"扬声器设备: {output_device}")
-        log("INFO", f"提示音防回声等待: {self.echo_tail * 1000:.0f}毫秒")
+        log("INFO", f"短提示音/语音提示防回声等待: {self.tone_echo_tail * 1000:.0f}/{self.echo_tail * 1000:.0f}毫秒")
         log("INFO", f"首次等待说话={self.initial_listen_timeout:g}秒，回复后续说窗口={self.followup_timeout:g}秒")
 
     async def run(self) -> None:
@@ -361,6 +386,10 @@ class HeadlessVoiceClient:
                 if self._access_future and not self._access_future.done():
                     self._access_future.set_result("disconnected")
                 self._access_future = None
+                if self._music_abort_future and not self._music_abort_future.done():
+                    self._music_abort_future.set_result(False)
+                self._music_abort_future = None
+                self._music_active = False
                 await asyncio.to_thread(self.playback.stop_stream, drain_playback)
                 if (interrupted or farewell) and not self.stopping.is_set():
                     await asyncio.to_thread(self.playback.play_cue, "sleep" if farewell else "error")
@@ -421,7 +450,8 @@ class HeadlessVoiceClient:
             self._response_activity_at = time.monotonic()
             if not self._first_audio_at:
                 self._first_audio_at = self._response_activity_at
-                log("INFO", f"[性能][唤醒客户端] 提交录音到首帧={(self._first_audio_at - self._processing_started_at) * 1000:.0f}毫秒")
+                if self._processing_started_at:
+                    log("INFO", f"[性能][唤醒客户端] 提交录音到首帧={(self._first_audio_at - self._processing_started_at) * 1000:.0f}毫秒")
             if self._decoder is None:
                 self._decoder = self._decoder_type(self.output_sample_rate, 1)
             try:
@@ -490,10 +520,18 @@ class HeadlessVoiceClient:
 
     async def _handle_tts(self, payload: dict) -> None:
         tts_state = payload.get("state")
+        if tts_state == "music_start":
+            if self.state == STATE_PLAYING:
+                self._music_active = True
+                self.capture.flush()
+                self.kws.reset()
+                log("INFO", "音乐播放中，可说唤醒词打断；停歌并响就绪音后继续说话")
+            return
         if tts_state == "start":
             if self.state not in {STATE_LISTENING, STATE_PROCESSING, STATE_PLAYING}:
                 return
             already_playing = self.state == STATE_PLAYING
+            self._music_active = False
             self.state = STATE_PLAYING
             self._response_activity_at = time.monotonic()
             self.capture.flush()
@@ -507,7 +545,13 @@ class HeadlessVoiceClient:
         if tts_state == "sentence_start" and payload.get("text"):
             log("INFO", f"助手回复: {payload['text']}")
             return
+        if tts_state == "stop":
+            self._music_active = False
+            if self._music_abort_future and not self._music_abort_future.done():
+                self._music_abort_future.set_result(True)
+                return
         if tts_state == "stop" and self.state in {STATE_PROCESSING, STATE_PLAYING}:
+            self._tts_stopped_at = time.monotonic()
             self.state = STATE_DRAINING
             self._completion_task = asyncio.create_task(self._after_reply(self._epoch))
 
@@ -533,7 +577,11 @@ class HeadlessVoiceClient:
                     continue  # 状态转换前取出的音频可能仍包含提示音/播报尾音。
 
                 if self.state == STATE_WAIT_WAKE:
-                    self.speech_endpoint.observe_pcm(chunk)
+                    is_speech = await self._speech_activity(chunk)
+                    if is_speech is False:
+                        self.speech_endpoint.observe_noise(self.speech_endpoint.pcm_rms(chunk), trusted=True)
+                    elif is_speech is None:
+                        self.speech_endpoint.observe_pcm(chunk)
                     wake_word = await asyncio.to_thread(self.kws.accept_pcm, chunk)
                     if wake_word:
                         await self._handle_wake_word(wake_word)
@@ -541,6 +589,12 @@ class HeadlessVoiceClient:
                     await self._stream_followup_audio(chunk)
                 elif self.state == STATE_LISTENING:
                     await self._stream_command_audio(chunk)
+                elif self.state == STATE_PLAYING and self._music_active:
+                    await self._stream_music_audio(chunk)
+                else:
+                    # Keep VAD warm while audio is playing; resetting on every
+                    # reply can classify the first background frames as speech.
+                    await self._speech_activity(chunk)
                 await self._check_state_timeout()
             except asyncio.CancelledError:
                 raise
@@ -577,6 +631,7 @@ class HeadlessVoiceClient:
             return
 
         access_status = await self._acquire_turn()
+        access_ready_at = time.monotonic()
         if epoch != self._epoch:
             return
         if access_status != "granted":
@@ -587,6 +642,7 @@ class HeadlessVoiceClient:
         # 保持采集进程运行，避免 ES8388/PulseAudio 重开输入时产生强瞬态。
         # 提示音及其声学尾音会在进入正式收音前统一丢弃。
         self.capture.flush()
+        cue_started_at = time.monotonic()
         played = False
         if self.acknowledgement_mode == "voice":
             played = await asyncio.to_thread(
@@ -594,7 +650,8 @@ class HeadlessVoiceClient:
             )
         if not played:
             await asyncio.to_thread(self.playback.play_cue, "ready")
-        await asyncio.sleep(self.echo_tail)
+        cue_finished_at = time.monotonic()
+        await asyncio.sleep(self.echo_tail if played else self.tone_echo_tail)
         if epoch != self._epoch or not self.connected.is_set():
             return
         self.capture.flush()
@@ -607,7 +664,47 @@ class HeadlessVoiceClient:
         self.kws.reset()
         if await self._begin_listening():
             log("INFO", f"[性能][唤醒客户端] 检出到可收音={(time.monotonic() - self._wake_detected_at) * 1000:.0f}毫秒")
+            log("INFO", f"[性能][唤醒分段] 通道申请={(access_ready_at - self._wake_detected_at) * 1000:.0f}毫秒，"
+                f"提示音播放={(cue_finished_at - cue_started_at) * 1000:.0f}毫秒，"
+                f"尾音等待={(self.echo_tail if played else self.tone_echo_tail) * 1000:.0f}毫秒")
             log("INFO", f"唤醒成功，请在{self.initial_listen_timeout:g}秒内开始说话")
+
+    async def _stream_music_audio(self, chunk: bytes) -> None:
+        # Music/lyrics are never uploaded as a command. Only KWS can interrupt.
+        await self._speech_activity(chunk)
+        wake_word = await asyncio.to_thread(self.kws.accept_pcm, chunk)
+        if not wake_word or self.state != STATE_PLAYING or not self._music_active:
+            return
+        detected_at = time.monotonic()
+        self._invalidate_turn()
+        epoch = self._epoch
+        self.state = STATE_RESERVING  # Drop buffered music while stopping the server.
+        self._music_active = False
+        future = asyncio.get_running_loop().create_future()
+        self._music_abort_future = future
+        try:
+            await asyncio.to_thread(self.playback.stop_stream, False)
+            self._decoder = None
+            self.capture.flush()
+            if not await self._send_json({"type": "abort", "reason": "wake_word"}):
+                raise ConnectionError("音乐打断消息发送失败")
+            stopped = await asyncio.wait_for(future, timeout=3)
+            if not stopped or epoch != self._epoch or not self.connected.is_set():
+                return
+            self.kws.reset()
+            self._reset_command_state()
+            self.state = STATE_WAIT_WAKE
+            await self._handle_wake_word(wake_word)
+            if self.state == STATE_LISTENING:
+                log("INFO", f"[性能][音乐唤醒] 检出到可收音={(time.monotonic()-detected_at)*1000:.0f}毫秒")
+        except (asyncio.TimeoutError, ConnectionError) as exc:
+            log("WARN", f"音乐打断失败，重新连接: {exc}")
+            websocket = self.websocket
+            await self._return_to_wake("music_interrupt_failed", release=False, cue="error")
+            if websocket:
+                await websocket.close()
+        finally:
+            self._music_abort_future = None
 
     async def _begin_listening(self, *, keep_endpoint: bool = False) -> bool:
         epoch = self._epoch
@@ -652,6 +749,7 @@ class HeadlessVoiceClient:
                 chunk,
                 now,
                 self._listen_started_at,
+                is_speech=await self._speech_activity(chunk),
             )
         )
 
@@ -661,6 +759,7 @@ class HeadlessVoiceClient:
                 f"[音频诊断][本地端点] RMS={rms:.4f}，"
                 f"噪声底={self.speech_endpoint.noise_floor:.4f}，"
                 f"阈值={high_threshold:.4f}/{low_threshold:.4f}，"
+                f"语音概率={self._vad_probability:.3f}，"
                 f"已检测语音={self.speech_endpoint.heard_voice}",
             )
             self._last_audio_diagnostic_at = now
@@ -737,14 +836,33 @@ class HeadlessVoiceClient:
     async def _after_reply(self, epoch: int) -> None:
         try:
             await asyncio.to_thread(self.playback.stop_stream)
-            await asyncio.sleep(self.reply_echo_tail)
+            # Server protection runs from tts/stop, concurrently with local drain.
+            # Wait for its remaining time rather than adding it again afterward.
+            remaining = self._tts_stopped_at + self.reply_echo_tail - time.monotonic()
+            await asyncio.sleep(max(self.echo_tail, remaining, 0.0))
             if epoch != self._epoch or not self.connected.is_set():
                 return
             if self.followup_timeout <= 0 or self._exit_requested:
                 await self._return_to_wake("tts_complete", release=False, cue="sleep")
                 return
+            if self.speech_vad:
+                # Arm followup only after a genuine quiet gap following playback.
+                # A lingering reply/echo must never become a fresh speech onset.
+                deadline = time.monotonic() + 1.5
+                while epoch == self._epoch and self.connected.is_set():
+                    now = time.monotonic()
+                    if (self._vad_quiet_since is not None
+                            and now - self._vad_quiet_since >= 0.2
+                            and now - self._vad_checked_at <= 0.2):
+                        break
+                    if now >= deadline:
+                        await self._return_to_wake("reply_not_quiet", release=False, cue="sleep")
+                        return
+                    await asyncio.sleep(0.04)
+                if epoch != self._epoch or not self.connected.is_set():
+                    return
             await asyncio.to_thread(self.playback.play_cue, "ready")
-            await asyncio.sleep(self.echo_tail)
+            await asyncio.sleep(self.tone_echo_tail)
             if epoch != self._epoch or not self.connected.is_set():
                 return
             self.capture.flush()
@@ -766,7 +884,10 @@ class HeadlessVoiceClient:
             await self._return_to_wake("followup_timeout", release=False, cue="sleep")
             return
         self._preroll.append(chunk)
-        self.speech_endpoint.process_pcm(chunk, now, self._followup_started_at)
+        self.speech_endpoint.process_pcm(
+            chunk, now, self._followup_started_at,
+            is_speech=await self._speech_activity(chunk),
+        )
         if not self.speech_endpoint.heard_voice:
             return
         self.state = STATE_RESERVING
@@ -783,6 +904,27 @@ class HeadlessVoiceClient:
         if await self._begin_listening(keep_endpoint=True):
             await self._encode_and_send(buffered)
 
+    async def _speech_activity(self, chunk: bytes):
+        if self.speech_vad is None:
+            return None
+        probability = await asyncio.to_thread(self.speech_vad.probability, chunk)
+        self._vad_probability = probability
+        now = time.monotonic()
+        self._vad_checked_at = now
+        if probability <= self.vad_threshold_low:
+            if self._vad_quiet_since is None:
+                self._vad_quiet_since = now
+        else:
+            self._vad_quiet_since = None
+        threshold = self.vad_threshold_low if self.speech_endpoint.heard_voice else self.vad_threshold
+        interval = 2.0 if self.state == STATE_FOLLOWUP else 30.0
+        if now - self._vad_diagnostic_at >= interval:
+            log("DEBUG", f"[音频诊断][本地人声] 状态={self.state}，"
+                f"RMS={self.speech_endpoint.pcm_rms(chunk):.4f}，"
+                f"语音概率={probability:.3f}，已检测语音={self.speech_endpoint.heard_voice}")
+            self._vad_diagnostic_at = now
+        return probability >= threshold
+
     def _invalidate_turn(self) -> None:
         self._epoch += 1
         task = self._completion_task
@@ -797,7 +939,9 @@ class HeadlessVoiceClient:
         self._processing_started_at = 0.0
         self._response_activity_at = 0.0
         self._first_audio_at = 0.0
+        self._tts_stopped_at = 0.0
         self._exit_requested = False
+        self._music_active = False
         if not keep_endpoint:
             self.speech_endpoint.reset_command()
         self._last_audio_diagnostic_at = 0.0

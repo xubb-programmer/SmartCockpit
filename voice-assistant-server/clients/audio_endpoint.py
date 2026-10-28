@@ -40,11 +40,11 @@ class SpeechEndpoint:
             return 0.0
         return float(np.percentile(self.noise_samples, 20))
 
-    def observe_noise(self, rms: float) -> None:
+    def observe_noise(self, rms: float, *, trusted: bool = False) -> None:
         # 仅用低于起音门限的帧更新背景，不能把人声/唤醒词当成噪声。
         # 数字静音也要参与更新，否则旧基线在静音后永远无法恢复。
         high, _ = self.thresholds()
-        if 0.0 <= rms < high:
+        if rms >= 0.0 and (trusted or rms < high):
             self.noise_samples.append(rms)
 
     def onset_pending(self, now: float, deadline: float, chunk_seconds: float) -> bool:
@@ -78,13 +78,17 @@ class SpeechEndpoint:
         self.last_voice_at = 0.0
 
     def process_pcm(
-        self, pcm: bytes, now: float, listen_started_at: float
+        self, pcm: bytes, now: float, listen_started_at: float, *, is_speech=None
     ) -> tuple[float, float, float, bool]:
         rms = self.pcm_rms(pcm)
         high, low = self.thresholds()
+        if is_speech is not None:
+            # VAD distinguishes speech from loud steady background; an adaptive
+            # energy threshold must not hide speech already identified by VAD.
+            high = low = self.speech_rms_threshold_low
 
         if not self.heard_voice:
-            if rms >= high:
+            if rms >= high and is_speech is not False:
                 if self.voice_candidate_at is None:
                     self.voice_candidate_at = now
                 if now - self.voice_candidate_at >= self.speech_start_hold_seconds:
@@ -93,9 +97,10 @@ class SpeechEndpoint:
                     self.last_voice_at = now
             else:
                 # 不将待确认的人声当作噪声，否则轻声/短句会抬高自己的门限。
-                self.observe_noise(rms)
+                if is_speech is not True:
+                    self.observe_noise(rms, trusted=is_speech is False)
                 self.voice_candidate_at = None
-        elif rms >= low:
+        elif rms >= low and is_speech is not False:
             self.last_voice_at = now
 
         should_finish = (

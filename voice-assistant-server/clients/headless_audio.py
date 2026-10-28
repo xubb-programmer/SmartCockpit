@@ -513,7 +513,7 @@ class PcmPlayback:
     def play_cue(self, name: str) -> bool:
         """无需模型的短提示：高音就绪、下降双音休眠、低双音异常。"""
         patterns = {
-            "ready": [(880, 100)],
+            "ready": [(880, 80)],
             "sleep": [(660, 90), (0, 35), (440, 140)],
             "error": [(280, 120), (0, 65), (280, 180)],
         }

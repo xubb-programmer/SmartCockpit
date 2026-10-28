@@ -45,14 +45,14 @@ class HeadlessAudioDeviceTests(unittest.TestCase):
             playback._prepare_pulse_format()
         self.assertEqual(resolve.call_count, 2)
 
-    def test_ready_cue_is_100ms_and_end_cue_is_distinct(self):
+    def test_ready_cue_is_80ms_and_end_cue_is_distinct(self):
         playback = PcmPlayback("sink")
         with patch.object(playback, "_play_pcm", return_value=True) as play:
             playback.play_cue("ready")
             ready = play.call_args.args[0]
             playback.play_cue("sleep")
             sleep = play.call_args.args[0]
-        self.assertEqual(len(ready), 24000 * 2 // 10)
+        self.assertEqual(len(ready), 24000 * 2 * 80 // 1000)
         self.assertNotEqual(ready, sleep)
         self.assertEqual(ready[:2], b"\0\0")
         self.assertEqual(ready[-2:], b"\0\0")
@@ -122,6 +122,17 @@ class HeadlessAudioDeviceTests(unittest.TestCase):
 
 
 class HeadlessSpeechEndpointTests(unittest.TestCase):
+    def test_loud_non_speech_does_not_start_or_extend_command(self):
+        endpoint = SpeechEndpoint(speech_start_hold_seconds=0)
+        background = (1800).to_bytes(2, "little", signed=True) * 640
+        for index in range(100):
+            endpoint.process_pcm(background, index * .04, 0, is_speech=False)
+        self.assertFalse(endpoint.heard_voice)
+        self.assertGreater(endpoint.noise_floor, .05)
+        endpoint.process_pcm((655).to_bytes(2, "little", signed=True) * 640, 5, 0, is_speech=True)
+        self.assertTrue(endpoint.heard_voice)
+        self.assertTrue(endpoint.process_pcm(background, 6.3, 0, is_speech=False)[3])
+
     def test_loud_pre_wake_speech_does_not_hide_quiet_command(self):
         endpoint = SpeechEndpoint(speech_min_seconds=0.35, speech_end_seconds=0.5)
         for amplitude in [30] * 80 + [1000] * 80:

@@ -107,7 +107,14 @@ voice_access:
     ping_interval_seconds: 30
     # 提示音播放结束后等待声学尾音消退，避免扬声器回灌被识别成用户指令。
     echo_suppression_tail_ms: 200
-    # 板端本地端点检测：使用噪声底和双阈值，避免短句被误判为无声
+    # 短纯音不使用完整语音播报的等待；本地 VAD 继续阻止回灌触发。
+    tone_echo_suppression_tail_ms: 80
+    # 先用本地 Silero 判断人声，再做句尾检测；不能只凭音量触发续说。
+    speech_vad_enabled: true
+    speech_vad_threshold: 0.6
+    speech_vad_threshold_low: 0.2
+    speech_vad_start_hold_ms: 120
+    # 能量下限过滤极弱信号；噪声底仍用于诊断和无 VAD 的兼容模式。
     speech_rms_threshold: 0.006
     speech_rms_threshold_low: 0.003
     speech_noise_multiplier: 2.0

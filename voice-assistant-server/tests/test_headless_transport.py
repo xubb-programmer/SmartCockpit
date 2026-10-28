@@ -103,6 +103,7 @@ class HeadlessTransportTests(unittest.IsolatedAsyncioTestCase):
                 client = HeadlessVoiceClient({"voice_access": {"mode": "hybrid", "headless": {
                     "websocket_url": f"ws://127.0.0.1:{port}/",
                     "followup_timeout_seconds": 1,
+                    "speech_vad_enabled": False,
                 }}})
                 client.echo_tail = client.reply_echo_tail = 0
                 running = asyncio.create_task(client.run())
