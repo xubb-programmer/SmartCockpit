@@ -9,6 +9,7 @@ import signal
 import sys
 import time
 import uuid
+from collections import deque
 from pathlib import Path
 from urllib.parse import urlencode, urlsplit, urlunsplit
 
@@ -24,7 +25,6 @@ from clients.headless_audio import (
     resolve_audio_device,
 )
 from clients.headless_kws import SherpaKeywordDetector
-from config.config_loader import load_config
 from core.auth import AuthManager
 from core.interaction_access import get_access_config, get_access_mode
 
@@ -35,6 +35,8 @@ STATE_ACKNOWLEDGING = "acknowledging"
 STATE_LISTENING = "listening"
 STATE_PROCESSING = "processing"
 STATE_PLAYING = "playing"
+STATE_DRAINING = "draining"
+STATE_FOLLOWUP = "followup"
 
 
 def log(level: str, message: str) -> None:
@@ -108,7 +110,7 @@ class HeadlessVoiceClient:
         self.frame_samples = self.sample_rate * self.frame_duration_ms // 1000
         self.frame_bytes = self.frame_samples * 2
         self.capture_chunk_ms = min(
-            200, max(20, int(headless_config.get("capture_chunk_ms", 100)))
+            200, max(20, int(headless_config.get("capture_chunk_ms", 40)))
         )
         self.command_timeout = float(
             headless_config.get("command_timeout_seconds", 12)
@@ -116,12 +118,27 @@ class HeadlessVoiceClient:
         self.response_timeout = float(
             headless_config.get("response_timeout_seconds", 120)
         )
+        self.initial_listen_timeout = max(1.0, float(
+            headless_config.get("initial_listen_timeout_seconds", 8)
+        ))
+        self.followup_timeout = max(0.0, float(
+            headless_config.get("followup_timeout_seconds", 8)
+        ))
+        self.acknowledgement_mode = str(
+            headless_config.get("acknowledgement_mode", "tone")
+        )
+        if self.acknowledgement_mode not in {"tone", "voice"}:
+            raise ValueError("acknowledgement_mode 必须为 tone 或 voice")
         self.ping_interval = float(
             headless_config.get("ping_interval_seconds", 30)
         )
         self.echo_tail = float(
-            headless_config.get("echo_suppression_tail_ms", 120)
+            headless_config.get("echo_suppression_tail_ms", 200)
         ) / 1000.0
+        # 服务端 TTS stop 后也有抑制窗口，续说必须等两侧均可接收。
+        self.reply_echo_tail = max(
+            self.echo_tail, float(config.get("echo_suppression_tail_ms", 800)) / 1000
+        )
         self.speech_endpoint = SpeechEndpoint(
             speech_rms_threshold=float(
                 headless_config.get("speech_rms_threshold", 0.006)
@@ -140,10 +157,10 @@ class HeadlessVoiceClient:
             )
             / 1000.0,
             speech_min_seconds=float(
-                headless_config.get("speech_min_seconds", 0.8)
+                headless_config.get("speech_min_seconds", 0.35)
             ),
             speech_end_seconds=float(
-                headless_config.get("speech_end_seconds", 1.2)
+                headless_config.get("speech_end_seconds", 0.5)
             ),
         )
         self.capture_queue_seconds = int(
@@ -231,6 +248,14 @@ class HeadlessVoiceClient:
         self._processing_started_at = 0.0
         self._last_audio_diagnostic_at = 0.0
         self._current_wake_word = ""
+        self._epoch = 0
+        self._completion_task = None
+        self._followup_started_at = 0.0
+        self._response_activity_at = 0.0
+        self._first_audio_at = 0.0
+        self._wake_detected_at = 0.0
+        self._exit_requested = False
+        self._preroll = deque(maxlen=max(2, 320 // self.capture_chunk_ms))
 
         log("INFO", f"语音入口模式: {self.mode}")
         log("INFO", f"音频后端: {self.audio_backend}")
@@ -238,6 +263,7 @@ class HeadlessVoiceClient:
         log("INFO", f"麦克风设备: {input_device}")
         log("INFO", f"扬声器设备: {output_device}")
         log("INFO", f"提示音防回声等待: {self.echo_tail * 1000:.0f}毫秒")
+        log("INFO", f"首次等待说话={self.initial_listen_timeout:g}秒，回复后续说窗口={self.followup_timeout:g}秒")
 
     async def run(self) -> None:
         if not await self._start_capture_with_retry(self.audio_start_timeout):
@@ -248,6 +274,7 @@ class HeadlessVoiceClient:
         try:
             await self.stopping.wait()
         finally:
+            self._invalidate_turn()
             for task in (connection_task, audio_task):
                 task.cancel()
             await asyncio.gather(connection_task, audio_task, return_exceptions=True)
@@ -320,14 +347,24 @@ class HeadlessVoiceClient:
             except Exception as exc:
                 log("WARN", f"语音服务连接中断: {exc}")
             finally:
+                drain_playback = self.state == STATE_DRAINING or self._exit_requested
+                interrupted = self.state in {
+                    STATE_LISTENING, STATE_PROCESSING, STATE_PLAYING,
+                } and not self._exit_requested
                 self.connected.clear()
                 self.websocket = None
+                self._invalidate_turn()
                 if self._access_future and not self._access_future.done():
                     self._access_future.set_result("disconnected")
                 self._access_future = None
-                await asyncio.to_thread(self.playback.stop_stream)
+                await asyncio.to_thread(self.playback.stop_stream, drain_playback)
+                if interrupted and not self.stopping.is_set():
+                    await asyncio.to_thread(self.playback.play_cue, "error")
+                    await asyncio.sleep(self.echo_tail)
                 self.state = STATE_WAIT_WAKE
-                self._encoder_buffer.clear()
+                self.capture.flush()
+                self.kws.reset()
+                self._reset_command_state()
 
             if not self.stopping.is_set():
                 await asyncio.sleep(retry_delay)
@@ -375,6 +412,12 @@ class HeadlessVoiceClient:
 
     async def _handle_message(self, message) -> None:
         if isinstance(message, bytes):
+            if self.state not in {STATE_PROCESSING, STATE_PLAYING}:
+                return  # 已结束/超时轮次的迟到音频不能重新打开播放。
+            self._response_activity_at = time.monotonic()
+            if not self._first_audio_at:
+                self._first_audio_at = self._response_activity_at
+                log("INFO", f"[性能][唤醒客户端] 提交录音到首帧={(self._first_audio_at - self._processing_started_at) * 1000:.0f}毫秒")
             if self._decoder is None:
                 self._decoder = self._decoder_type(self.output_sample_rate, 1)
             try:
@@ -405,7 +448,7 @@ class HeadlessVoiceClient:
 
         if message_type == "access":
             status = str(payload.get("status", "unknown"))
-            if self._access_future and not self._access_future.done():
+            if status in {"granted", "busy", "denied", "initializing"} and self._access_future and not self._access_future.done():
                 self._access_future.set_result(status)
             if status == "denied":
                 log("ERROR", payload.get("message", "当前模式不接受唤醒客户端"))
@@ -417,9 +460,14 @@ class HeadlessVoiceClient:
             text = payload.get("text", "")
             if text:
                 log("INFO", f"识别结果: {text}")
+                self._exit_requested = text.strip(" 。！？,.!?\n") in self.config.get(
+                    "exit_commands", ["退出", "关闭", "再见", "告别", "结束对话"]
+                )
             if self.state == STATE_LISTENING:
                 self.state = STATE_PROCESSING
                 self._processing_started_at = time.monotonic()
+            if self.state in {STATE_PROCESSING, STATE_PLAYING}:
+                self._response_activity_at = time.monotonic()
             return
 
         if message_type == "tts":
@@ -428,12 +476,25 @@ class HeadlessVoiceClient:
 
         if message_type == "server":
             log("WARN", payload.get("message", "语音服务状态异常"))
+            if payload.get("status") in {"empty_asr", "asr_error", "initializing"}:
+                if self.state in {STATE_LISTENING, STATE_PROCESSING, STATE_PLAYING}:
+                    # 接收循环不能等待 acquire 回复；后续转移交给独立任务。
+                    self.state = STATE_DRAINING
+                    self._completion_task = asyncio.create_task(
+                        self._return_to_wake(str(payload["status"]), release=True, cue="error")
+                    )
 
     async def _handle_tts(self, payload: dict) -> None:
         tts_state = payload.get("state")
         if tts_state == "start":
+            if self.state not in {STATE_LISTENING, STATE_PROCESSING, STATE_PLAYING}:
+                return
+            already_playing = self.state == STATE_PLAYING
             self.state = STATE_PLAYING
+            self._response_activity_at = time.monotonic()
             self.capture.flush()
+            if already_playing:
+                return
             self._decoder = self._decoder_type(self.output_sample_rate, 1)
             await asyncio.to_thread(
                 self.playback.start_stream, self.output_sample_rate
@@ -442,38 +503,46 @@ class HeadlessVoiceClient:
         if tts_state == "sentence_start" and payload.get("text"):
             log("INFO", f"助手回复: {payload['text']}")
             return
-        if tts_state == "stop":
-            await asyncio.to_thread(self.playback.stop_stream)
-            await self._return_to_wake("tts_complete", release=False)
+        if tts_state == "stop" and self.state in {STATE_PROCESSING, STATE_PLAYING}:
+            self.state = STATE_DRAINING
+            self._completion_task = asyncio.create_task(self._after_reply(self._epoch))
 
     async def _audio_loop(self) -> None:
         while not self.stopping.is_set():
             try:
+                state_before_read = self.state
                 chunk = await asyncio.to_thread(self.capture.read, 0.5)
                 if chunk is None:
                     if not self.capture.is_alive():
                         reason = self.capture.error or "麦克风采集进程异常退出"
                         log("ERROR", f"{reason}，尝试自动恢复")
+                        active_request = self.state in {STATE_PROCESSING, STATE_PLAYING}
+                        websocket = self.websocket
+                        await self._return_to_wake("capture_lost", release=True, cue="error")
+                        if active_request and websocket:
+                            await websocket.close()
                         await self._restart_capture()
                     await self._check_state_timeout()
                     continue
 
+                if state_before_read != self.state:
+                    continue  # 状态转换前取出的音频可能仍包含提示音/播报尾音。
+
                 if self.state == STATE_WAIT_WAKE:
                     self.speech_endpoint.observe_pcm(chunk)
-                    wake_word = self.kws.accept_pcm(chunk)
+                    wake_word = await asyncio.to_thread(self.kws.accept_pcm, chunk)
                     if wake_word:
                         await self._handle_wake_word(wake_word)
+                elif self.state == STATE_FOLLOWUP:
+                    await self._stream_followup_audio(chunk)
                 elif self.state == STATE_LISTENING:
                     await self._stream_command_audio(chunk)
-                    await self._check_state_timeout()
-                elif self.state == STATE_PROCESSING:
-                    await self._check_state_timeout()
+                await self._check_state_timeout()
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 log("ERROR", f"音频循环异常: {exc}，尝试自动恢复")
-                self.state = STATE_WAIT_WAKE
-                self._reset_command_state()
+                await self._return_to_wake("audio_error", release=True, cue="error")
                 await self._restart_capture()
 
     async def _restart_capture(self) -> None:
@@ -493,32 +562,37 @@ class HeadlessVoiceClient:
         if self.state != STATE_WAIT_WAKE:
             return
         self.state = STATE_RESERVING
+        epoch = self._epoch
+        self._wake_detected_at = time.monotonic()
         self._current_wake_word = wake_word
         log("INFO", f"检测到唤醒词: {wake_word}")
 
         if not self.connected.is_set():
             log("WARN", "语音服务尚未连接")
-            await asyncio.to_thread(self.playback.play_tone, 260, 260)
-            await self._return_to_wake("server_unavailable", release=False)
+            await self._return_to_wake("server_unavailable", release=False, cue="error")
             return
 
         access_status = await self._acquire_turn()
+        if epoch != self._epoch:
+            return
         if access_status != "granted":
-            await asyncio.to_thread(self.playback.play_tone, 330, 160)
-            await asyncio.to_thread(self.playback.play_tone, 260, 220)
-            await self._return_to_wake("access_busy", release=False)
+            await self._return_to_wake("access_" + access_status, release=True, cue="error")
             return
 
         self.state = STATE_ACKNOWLEDGING
         # 保持采集进程运行，避免 ES8388/PulseAudio 重开输入时产生强瞬态。
         # 提示音及其声学尾音会在进入正式收音前统一丢弃。
         self.capture.flush()
-        played = await asyncio.to_thread(
-            self.playback.play_wave_file, self.acknowledgement_audio
-        )
+        played = False
+        if self.acknowledgement_mode == "voice":
+            played = await asyncio.to_thread(
+                self.playback.play_wave_file, self.acknowledgement_audio
+            )
         if not played:
-            await asyncio.to_thread(self.playback.play_tone, 660, 120)
+            await asyncio.to_thread(self.playback.play_cue, "ready")
         await asyncio.sleep(self.echo_tail)
+        if epoch != self._epoch or not self.connected.is_set():
+            return
         self.capture.flush()
         if not self.capture.is_alive():
             log("WARN", self.capture.error or "播放提示音期间麦克风采集已退出")
@@ -527,26 +601,37 @@ class HeadlessVoiceClient:
                 await self._return_to_wake("capture_restart_failed", release=True)
                 return
         self.kws.reset()
-        self._reset_command_state()
+        if await self._begin_listening():
+            log("INFO", f"[性能][唤醒客户端] 检出到可收音={(time.monotonic() - self._wake_detected_at) * 1000:.0f}毫秒")
+            log("INFO", f"唤醒成功，请在{self.initial_listen_timeout:g}秒内开始说话")
+
+    async def _begin_listening(self, *, keep_endpoint: bool = False) -> bool:
+        epoch = self._epoch
+        self._reset_command_state(keep_endpoint=keep_endpoint)
         if not await self._send_json(
             {"type": "listen", "state": "start", "mode": "manual"}
         ):
             await self._return_to_wake("listen_start_failed", release=True)
-            return
+            return False
+        if epoch != self._epoch or not self.connected.is_set():
+            return False
         self.state = STATE_LISTENING
         self._listen_started_at = time.monotonic()
-        log("INFO", "唤醒成功，请说出指令")
+        return True
 
     async def _acquire_turn(self) -> str:
         loop = asyncio.get_running_loop()
         self._access_future = loop.create_future()
-        if not await self._send_json(
-            {"type": "access", "action": "acquire", "reason": "wake_word"}
-        ):
-            return "disconnected"
         try:
+            if not await self._send_json(
+                {"type": "access", "action": "acquire", "reason": "wake_word"}
+            ):
+                return "disconnected"
             return await asyncio.wait_for(self._access_future, timeout=4)
         except asyncio.TimeoutError:
+            # 关闭本次连接，避免迟到的 granted 被下一次唤醒误用。
+            if self.websocket:
+                await self.websocket.close()
             return "timeout"
         finally:
             self._access_future = None
@@ -571,6 +656,13 @@ class HeadlessVoiceClient:
             )
             self._last_audio_diagnostic_at = now
 
+        if not await self._encode_and_send(chunk):
+            return
+
+        if should_finish:
+            await self._finish_listening("local_silence")
+
+    async def _encode_and_send(self, chunk: bytes) -> bool:
         self._encoder_buffer.extend(chunk)
         while len(self._encoder_buffer) >= self.frame_bytes:
             frame = bytes(self._encoder_buffer[: self.frame_bytes])
@@ -578,19 +670,26 @@ class HeadlessVoiceClient:
             encoded = self._encoder.encode(frame, self.frame_samples)
             if not await self._send_audio(encoded):
                 await self._return_to_wake("audio_send_failed", release=True)
-                return
-
-        if should_finish:
-            await self._finish_listening("local_silence")
+                return False
+        return True
 
     async def _finish_listening(self, reason: str) -> None:
         if self.state != STATE_LISTENING:
             return
+        # 最后一块不足一帧时补零发送，不能悄悄丢失句尾。
+        if self._encoder_buffer:
+            padding = b"\0" * (self.frame_bytes - len(self._encoder_buffer))
+            if not await self._encode_and_send(padding):
+                return
         self.state = STATE_PROCESSING
         self._processing_started_at = time.monotonic()
-        await self._send_json(
+        self._response_activity_at = self._processing_started_at
+        if not await self._send_json(
             {"type": "listen", "state": "stop", "mode": "manual"}
-        )
+        ):
+            await self._return_to_wake("listen_stop_failed", release=True, cue="error")
+            return
+        log("INFO", f"[性能][唤醒客户端] 句尾等待={(self._processing_started_at - self.speech_endpoint.last_voice_at) * 1000:.0f}毫秒")
         log("INFO", f"指令录音结束，等待处理: {reason}")
 
     async def _check_state_timeout(self) -> None:
@@ -598,39 +697,112 @@ class HeadlessVoiceClient:
         if (
             self.state == STATE_LISTENING
             and self._listen_started_at
-            and now - self._listen_started_at >= self.command_timeout
         ):
-            if not self.speech_endpoint.heard_voice:
+            if not self.speech_endpoint.heard_voice and now - self._listen_started_at >= self.initial_listen_timeout:
                 await self._send_json(
                     {"type": "listen", "state": "cancel", "mode": "manual"}
                 )
                 log("WARN", "唤醒后未检测到有效指令，取消本轮处理")
-                await self._return_to_wake("no_command", release=True)
-            else:
+                await self._return_to_wake("no_command", release=True, cue="sleep")
+            elif self.speech_endpoint.first_voice_at is not None and now - self.speech_endpoint.first_voice_at >= self.command_timeout:
                 await self._finish_listening("command_timeout")
         elif (
-            self.state == STATE_PROCESSING
-            and self._processing_started_at
-            and now - self._processing_started_at >= self.response_timeout
+            self.state in {STATE_PROCESSING, STATE_PLAYING}
+            and self._response_activity_at
+            and now - self._response_activity_at >= self.response_timeout
         ):
             log("WARN", "语音请求处理超时，重新进入唤醒等待")
-            await self._return_to_wake("response_timeout", release=True)
+            websocket = self.websocket
+            await self._return_to_wake("response_timeout", release=True, cue="error")
+            if websocket:
+                await websocket.close()  # 隔离旧回复，重连后才接受下一轮。
+        elif self.state == STATE_FOLLOWUP and now - self._followup_started_at >= self.followup_timeout:
+            await self._return_to_wake("followup_timeout", release=False, cue="sleep")
 
-    def _reset_command_state(self) -> None:
+    async def _after_reply(self, epoch: int) -> None:
+        try:
+            await asyncio.to_thread(self.playback.stop_stream)
+            await asyncio.sleep(self.reply_echo_tail)
+            if epoch != self._epoch or not self.connected.is_set():
+                return
+            if self.followup_timeout <= 0 or self._exit_requested:
+                await self._return_to_wake("tts_complete", release=False, cue="sleep")
+                return
+            await asyncio.to_thread(self.playback.play_cue, "ready")
+            await asyncio.sleep(self.echo_tail)
+            if epoch != self._epoch or not self.connected.is_set():
+                return
+            self.capture.flush()
+            self._reset_command_state()
+            self._preroll.clear()
+            self._followup_started_at = time.monotonic()
+            self.state = STATE_FOLLOWUP
+            log("INFO", f"可直接继续说话，{self.followup_timeout:g}秒无语音后响结束音，再次使用需唤醒")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log("ERROR", f"恢复续说失败: {exc}")
+            await self._return_to_wake("followup_error", release=True, cue="error")
+
+    async def _stream_followup_audio(self, chunk: bytes) -> None:
+        now = time.monotonic()
+        # 到期检查优先于识别，避免窗口结束后突然接收一句话。
+        if now - self._followup_started_at >= self.followup_timeout:
+            await self._return_to_wake("followup_timeout", release=False, cue="sleep")
+            return
+        self._preroll.append(chunk)
+        self.speech_endpoint.process_pcm(chunk, now, self._followup_started_at)
+        if not self.speech_endpoint.heard_voice:
+            return
+        self.state = STATE_RESERVING
+        epoch = self._epoch
+        status = await self._acquire_turn()
+        if epoch != self._epoch:
+            return
+        if status != "granted":
+            await self._return_to_wake("followup_" + status, release=True, cue="error")
+            return
+        # 等待续说时不占用通道；确认人声后再申请，并补发起音前缓存。
+        buffered = b"".join(self._preroll)
+        self._preroll.clear()
+        if await self._begin_listening(keep_endpoint=True):
+            await self._encode_and_send(buffered)
+
+    def _invalidate_turn(self) -> None:
+        self._epoch += 1
+        task = self._completion_task
+        if task and task is not asyncio.current_task() and not task.done():
+            task.cancel()
+        self._completion_task = None
+
+    def _reset_command_state(self, *, keep_endpoint: bool = False) -> None:
         self._encoder.reset_state()
         self._encoder_buffer.clear()
         self._listen_started_at = 0.0
         self._processing_started_at = 0.0
-        self.speech_endpoint.reset_command()
+        self._response_activity_at = 0.0
+        self._first_audio_at = 0.0
+        self._exit_requested = False
+        if not keep_endpoint:
+            self.speech_endpoint.reset_command()
         self._last_audio_diagnostic_at = 0.0
 
-    async def _return_to_wake(self, reason: str, release: bool) -> None:
+    async def _return_to_wake(self, reason: str, release: bool, cue: str = None) -> None:
+        self._invalidate_turn()
+        epoch = self._epoch
+        self.state = STATE_DRAINING
         if release and self.websocket:
             await self._send_json({"type": "access", "action": "release"})
-        self.playback.stop_stream()
+        await asyncio.to_thread(self.playback.stop_stream, False)
+        if cue:
+            await asyncio.to_thread(self.playback.play_cue, cue)
+            await asyncio.sleep(self.echo_tail)
+        if epoch != self._epoch:
+            return
         self.capture.flush()
         self.kws.reset()
         self._reset_command_state()
+        self._preroll.clear()
         self.state = STATE_WAIT_WAKE
         log("INFO", f"等待唤醒词，原因={reason}")
 
@@ -655,6 +827,8 @@ async def async_main(config: dict) -> int:
 
 
 def main() -> int:
+    from config.config_loader import load_config
+
     args = parse_args()
     config = load_config()
     mode_override = os.environ.get("VOICE_ACCESS_MODE", "").strip().lower()

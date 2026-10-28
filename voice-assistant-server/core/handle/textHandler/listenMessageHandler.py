@@ -82,6 +82,13 @@ class ListenTextMessageHandler(TextMessageHandler):
 
                     if len(asr_audio_task) > 0:
                         await conn.asr.handle_voice_stop(conn, asr_audio_task)
+                else:
+                    await conn.release_interaction_turn("empty_audio")
+                    if getattr(conn, "client_source", "web") == "headless":
+                        await conn.websocket.send(
+                            '{"type":"server","status":"empty_asr",'
+                            '"message":"未收到有效音频，请重新唤醒"}'
+                        )
         elif msg_json["state"] == "detect":
             conn.client_have_voice = False
             conn.reset_audio_states()

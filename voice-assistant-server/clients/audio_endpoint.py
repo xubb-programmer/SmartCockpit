@@ -25,7 +25,8 @@ class SpeechEndpoint:
         self.speech_end_seconds = max(0.1, speech_end_seconds)
         self.noise_samples = deque(maxlen=80)
         self.heard_voice = False
-        self.voice_candidate_at = 0.0
+        self.voice_candidate_at = None
+        self.first_voice_at = None
         self.last_voice_at = 0.0
 
     @staticmethod
@@ -61,7 +62,8 @@ class SpeechEndpoint:
 
     def reset_command(self) -> None:
         self.heard_voice = False
-        self.voice_candidate_at = 0.0
+        self.voice_candidate_at = None
+        self.first_voice_at = None
         self.last_voice_at = 0.0
 
     def process_pcm(
@@ -71,15 +73,17 @@ class SpeechEndpoint:
         high, low = self.thresholds()
 
         if not self.heard_voice:
-            self.observe_noise(rms)
             if rms >= high:
-                if not self.voice_candidate_at:
+                if self.voice_candidate_at is None:
                     self.voice_candidate_at = now
-                elif now - self.voice_candidate_at >= self.speech_start_hold_seconds:
+                if now - self.voice_candidate_at >= self.speech_start_hold_seconds:
                     self.heard_voice = True
+                    self.first_voice_at = self.voice_candidate_at
                     self.last_voice_at = now
             else:
-                self.voice_candidate_at = 0.0
+                # 不将待确认的人声当作噪声，否则轻声/短句会抬高自己的门限。
+                self.observe_noise(rms)
+                self.voice_candidate_at = None
         elif rms >= low:
             self.last_voice_at = now
 

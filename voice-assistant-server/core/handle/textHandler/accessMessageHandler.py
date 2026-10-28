@@ -20,6 +20,11 @@ class AccessTextMessageHandler(TextMessageHandler):
         action = str(msg_json.get("action", "status")).strip().lower()
 
         if action == "acquire":
+            if not await conn.wait_until_components_ready(timeout=3):
+                await conn.send_access_status(
+                    "initializing", "语音服务正在初始化，请稍后再试"
+                )
+                return
             acquired = await conn.acquire_interaction_turn(
                 reason=str(msg_json.get("reason", "client_request")),
                 notify_busy=False,

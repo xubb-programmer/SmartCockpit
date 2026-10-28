@@ -1,4 +1,5 @@
 from pathlib import Path
+from threading import Lock
 
 import numpy as np
 
@@ -38,6 +39,7 @@ class SherpaKeywordDetector:
             provider="cpu",
         )
         self._stream = self._spotter.create_stream()
+        self._lock = Lock()
 
     @staticmethod
     def _resolve(project_dir: Path, value: str) -> Path:
@@ -45,6 +47,10 @@ class SherpaKeywordDetector:
         return path if path.is_absolute() else project_dir / path
 
     def accept_pcm(self, pcm: bytes) -> str:
+        with self._lock:
+            return self._accept_pcm(pcm)
+
+    def _accept_pcm(self, pcm: bytes) -> str:
         if not pcm:
             return ""
         samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
@@ -60,4 +66,5 @@ class SherpaKeywordDetector:
         return result
 
     def reset(self) -> None:
-        self._spotter.reset_stream(self._stream)
+        with self._lock:
+            self._spotter.reset_stream(self._stream)

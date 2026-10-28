@@ -238,6 +238,8 @@ class PcmCapture:
                 "--format=s16le",
                 f"--rate={self.sample_rate}",
                 "--channels=1",
+                "--latency-msec=40",
+                "--process-time-msec=20",
             ]
         else:
             command = [
@@ -355,6 +357,7 @@ class PcmPlayback:
         self._rate_state = None
         self._process: Optional[subprocess.Popen] = None
         self._lock = threading.Lock()
+        self._format_checked_at = None
 
     def _pulse_command(self) -> list:
         return [
@@ -364,12 +367,18 @@ class PcmPlayback:
             "--format=s16le",
             f"--rate={self.playback_sample_rate}",
             f"--channels={self.playback_channels}",
+            "--latency-msec=60",
+            "--process-time-msec=20",
         ]
 
     def _prepare_pulse_format(self) -> None:
+        now = time.monotonic()
+        if self._format_checked_at is not None and now - self._format_checked_at < 30:
+            return
         self.playback_sample_rate, self.playback_channels = (
             resolve_pulse_playback_format(self.device)
         )
+        self._format_checked_at = now
 
     def _convert_for_playback(
         self, pcm: bytes, source_rate: int, source_channels: int = 1, state=None
@@ -430,12 +439,14 @@ class PcmPlayback:
             except (BrokenPipeError, OSError):
                 self._stop_stream_locked()
 
-    def _stop_stream_locked(self) -> None:
+    def _stop_stream_locked(self, drain: bool = True) -> None:
         process = self._process
         self._process = None
         if not process:
             return
         try:
+            if not drain and process.poll() is None:
+                process.terminate()
             if process.stdin:
                 process.stdin.close()
             process.wait(timeout=5)
@@ -447,9 +458,9 @@ class PcmPlayback:
                 except subprocess.TimeoutExpired:
                     process.kill()
 
-    def stop_stream(self) -> None:
+    def stop_stream(self, drain: bool = True) -> None:
         with self._lock:
-            self._stop_stream_locked()
+            self._stop_stream_locked(drain)
 
     def play_wave_file(self, path: Path, timeout: float = 10.0) -> bool:
         if not path.is_file():
@@ -497,15 +508,35 @@ class PcmPlayback:
                 for i in range(sample_count)
             ),
         )
+        return self._play_pcm(samples.tobytes())
+
+    def play_cue(self, name: str) -> bool:
+        """无需模型的短提示：高音就绪、下降双音休眠、低双音异常。"""
+        patterns = {
+            "ready": [(880, 100)],
+            "sleep": [(660, 90), (0, 35), (440, 140)],
+            "error": [(280, 120), (0, 65), (280, 180)],
+        }
+        samples = array.array("h")
+        for frequency, duration_ms in patterns[name]:
+            count = self.sample_rate * duration_ms // 1000
+            fade = max(1, self.sample_rate // 200)
+            samples.extend(
+                int(5500 * min(1.0, i / fade, (count - 1 - i) / fade)
+                    * math.sin(2 * math.pi * frequency * i / self.sample_rate))
+                for i in range(count)
+            )
+        return self._play_pcm(samples.tobytes())
+
+    def _play_pcm(self, pcm: bytes) -> bool:
         try:
             if self.backend == "pulse":
                 self._prepare_pulse_format()
                 pcm, _state = self._convert_for_playback(
-                    samples.tobytes(), self.sample_rate
+                    pcm, self.sample_rate
                 )
                 command = self._pulse_command()
             else:
-                pcm = samples.tobytes()
                 command = [
                     "aplay",
                     "-q",

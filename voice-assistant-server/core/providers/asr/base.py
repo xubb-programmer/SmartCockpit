@@ -210,12 +210,22 @@ class ASRProviderBase(ABC):
                 await startToChat(conn, enhanced_text)
             else:
                 await conn.release_interaction_turn("empty_asr_result")
+                await self._notify_headless_failure(conn, "empty_asr", "没有听清，请重新唤醒")
         except Exception as e:
             logger.bind(tag=TAG).error(f"处理语音停止失败: {e}")
             import traceback
 
             logger.bind(tag=TAG).debug(f"异常详情: {traceback.format_exc()}")
             await conn.release_interaction_turn("asr_error")
+            await self._notify_headless_failure(conn, "asr_error", "语音识别失败，请重新唤醒")
+
+    @staticmethod
+    async def _notify_headless_failure(conn, status: str, message: str) -> None:
+        # 无界面客户端无法从日志得知空识别，必须显式结束等待。
+        if getattr(conn, "client_source", "web") == "headless":
+            await conn.websocket.send(json.dumps({
+                "type": "server", "status": status, "message": message,
+            }, ensure_ascii=False))
 
     def _build_enhanced_text(self, text: str, speaker_name: Optional[str]) -> str:
         """构建包含说话人信息的文本（仅用于纯文本ASR）"""
