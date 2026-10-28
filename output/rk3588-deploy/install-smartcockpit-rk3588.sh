@@ -11,7 +11,9 @@ export PATH="${PATH}:/usr/sbin:/sbin"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PACKAGE_NAME="smartcockpit-rk3588-install.tar.gz"
 PACKAGE_FILE="${SCRIPT_DIR}/${PACKAGE_NAME}"
-PACKAGE_SHA256="d4a077abb1b361d2685a24753825b4285de9b8c26ca5b3609f599ea182848c34"
+PACKAGE_PART_COUNT=4
+PACKAGE_PART_FILES=()
+PACKAGE_SHA256="f23add8cce6f0ba2bed7e8980aa6261a123f3065e3b4bc2518fcbc3c6f323bfd"
 KIT_ROOT=''
 WORK_ROOT=''
 INSTALL_ROOT="/opt/jw"
@@ -19,6 +21,7 @@ LOG_DIR="${SCRIPT_DIR}/install-logs"
 STAMP="$(date +%Y%m%d-%H%M%S)"
 CURRENT_STEP="初始化"
 LOG_FILE=''
+VERIFY_ONLY=false
 
 cleanup() {
     if [[ -n "${WORK_ROOT}" && -d "${WORK_ROOT}" ]]; then
@@ -53,13 +56,15 @@ SmartCockpit RK3588 一键交互安装脚本
 用法:
   chmod +x install-smartcockpit-rk3588.sh
   ./install-smartcockpit-rk3588.sh
+  ./install-smartcockpit-rk3588.sh --verify-package  # 只校验分卷，不安装
 
 脚本会交互选择：
   1. 全新安装或完整替换
   2. 仅更新语音服务与 RKLLM 源码
   3. 只检查当前安装
 
-脚本同目录必须存在 smartcockpit-rk3588-install.tar.gz。
+脚本同目录放置完整归档，或全部 4 个 smartcockpit-rk3588-install.tar.gz.part01～part04 分卷。
+分卷会按顺序合并校验并直接解包，无需手动合并。
 EOF
 }
 
@@ -130,6 +135,14 @@ require_command() {
     fi
 }
 
+package_stream() {
+    if [[ -f "${PACKAGE_FILE}" ]]; then
+        cat -- "${PACKAGE_FILE}"
+    else
+        cat -- "${PACKAGE_PART_FILES[@]}"
+    fi
+}
+
 check_required_file() {
     local relative_path="$1"
     if [[ -f "${KIT_ROOT}/${relative_path}" ]]; then
@@ -156,21 +169,27 @@ if [[ "${1:-}" == '-h' || "${1:-}" == '--help' ]]; then
     print_help
     exit 0
 fi
+if [[ "${1:-}" == '--verify-package' ]]; then
+    VERIFY_ONLY=true
+    shift
+fi
 if [[ $# -gt 0 ]]; then
     fail "未知参数: $*"
     print_help
     exit 2
 fi
-if [[ ! -r /dev/tty ]]; then
+if [[ "${VERIFY_ONLY}" != true && ! -r /dev/tty ]]; then
     fail '当前没有交互终端，请通过 SSH 或板端终端运行本脚本。'
     exit 1
 fi
 
-mkdir -p "${LOG_DIR}" 2>/dev/null || LOG_DIR="/tmp"
-LOG_FILE="${LOG_DIR}/rk3588-install-${STAMP}.log"
-exec > >(tee -a "${LOG_FILE}") 2>&1
+if [[ "${VERIFY_ONLY}" != true ]]; then
+    mkdir -p "${LOG_DIR}" 2>/dev/null || LOG_DIR="/tmp"
+    LOG_FILE="${LOG_DIR}/rk3588-install-${STAMP}.log"
+    exec > >(tee -a "${LOG_FILE}") 2>&1
+fi
 
-for bootstrap_command in tar gzip sha256sum mktemp awk df; do
+for bootstrap_command in tar gzip sha256sum mktemp awk df cat; do
     if ! command -v "${bootstrap_command}" >/dev/null 2>&1; then
         fail "解包前缺少必要命令: ${bootstrap_command}"
         echo 'Debian/Ubuntu 可执行：sudo apt-get install -y tar gzip coreutils'
@@ -178,9 +197,16 @@ for bootstrap_command in tar gzip sha256sum mktemp awk df; do
     fi
 done
 if [[ ! -f "${PACKAGE_FILE}" ]]; then
-    fail "缺少离线部署包: ${PACKAGE_FILE}"
-    fail "请把 ${PACKAGE_NAME}、install-smartcockpit-rk3588.sh 和 README-INSTALL.md 放在同一目录。"
-    exit 1
+    for (( part_index=1; part_index<=PACKAGE_PART_COUNT; part_index++ )); do
+        printf -v part_name '%s.part%02d' "${PACKAGE_NAME}" "${part_index}"
+        if [[ ! -f "${SCRIPT_DIR}/${part_name}" ]]; then
+            fail "缺少部署分卷: ${part_name}"
+            fail "请完整复制 part01～part04、安装脚本和说明到同一目录。"
+            exit 1
+        fi
+        PACKAGE_PART_FILES+=("${SCRIPT_DIR}/${part_name}")
+    done
+    info "已找到 ${PACKAGE_PART_COUNT} 个部署分卷，将按顺序校验和解包。"
 fi
 if [[ "${PACKAGE_SHA256}" == 'TO_BE_FILLED_AFTER_PACKAGE_BUILD' ]]; then
     fail '安装脚本中的离线包校验值尚未生成，请使用正式发布材料。'
@@ -189,7 +215,7 @@ fi
 
 CURRENT_STEP='校验离线部署包'
 info '正在校验离线部署包 SHA-256，模型较大，可能需要几分钟。'
-ACTUAL_PACKAGE_SHA256="$(sha256sum "${PACKAGE_FILE}" | awk '{print $1}')"
+ACTUAL_PACKAGE_SHA256="$(package_stream | sha256sum | awk '{print $1}')"
 if [[ "${ACTUAL_PACKAGE_SHA256}" != "${PACKAGE_SHA256}" ]]; then
     fail '离线部署包 SHA-256 不匹配，文件可能复制不完整或已损坏。'
     echo "期望: ${PACKAGE_SHA256}"
@@ -197,6 +223,9 @@ if [[ "${ACTUAL_PACKAGE_SHA256}" != "${PACKAGE_SHA256}" ]]; then
     exit 1
 fi
 pass '离线部署包 SHA-256 校验通过。'
+if [[ "${VERIFY_ONLY}" == true ]]; then
+    exit 0
+fi
 
 echo
 echo '请选择操作模式：'
@@ -230,16 +259,15 @@ CURRENT_STEP='解压离线部署包'
 WORK_ROOT="$(mktemp -d "${TEMP_ROOT%/}/smartcockpit-rk3588-installer.XXXXXX")"
 case "${MODE}" in
     1)
-        tar -xzf "${PACKAGE_FILE}" -C "${WORK_ROOT}"
+        package_stream | tar -xzf - -C "${WORK_ROOT}"
         ;;
     2)
-        tar -xzf "${PACKAGE_FILE}" -C "${WORK_ROOT}" \
+        package_stream | tar -xzf - -C "${WORK_ROOT}" \
             payload/source scripts templates \
-            manifests/installed-payload.sha256 CHECKSUMS.sha256
+            manifests CHECKSUMS.sha256
         ;;
     3)
-        tar -xzf "${PACKAGE_FILE}" -C "${WORK_ROOT}" \
-            scripts/verify.sh manifests/installed-payload.sha256
+        package_stream | tar -xzf - -C "${WORK_ROOT}" scripts/verify.sh manifests
         ;;
 esac
 KIT_ROOT="${WORK_ROOT}"

@@ -22,8 +22,8 @@ models/*.rknn
 models/**/*.rkllm
 models/**/*.rknn
 
-# ── RK3588 离线部署包（纳入 Git LFS）─────────────────────────
-!output/rk3588-deploy/smartcockpit-rk3588-install.tar.gz
+# ── RK3588 仅保存最新分卷，完整归档为本地构建中间材料 ─────────
+/output/rk3588-deploy/*.new
 
 # ── 本地检查材料与部署包分卷副本 ────────────────────────────
 /tmp/

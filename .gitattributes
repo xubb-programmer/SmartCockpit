@@ -39,3 +39,4 @@
 *.zip filter=lfs diff=lfs merge=lfs -text
 Miniconda3-*.sh filter=lfs diff=lfs merge=lfs -text
 *.cache filter=lfs diff=lfs merge=lfs -text
+output/rk3588-deploy/smartcockpit-rk3588-install.tar.gz.part?? filter=lfs diff=lfs merge=lfs -text
