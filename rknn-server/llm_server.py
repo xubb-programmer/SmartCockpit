@@ -58,11 +58,12 @@ token_event = threading.Event()  # 新 token 到达时通知消费侧
 
 # 当前 RKLLM 调用状态。Flask 使用 threaded=True，取消请求必须能在推理
 # 请求持锁期间并行进入，因此这里不能复用推理锁。
-_active_call_lock = threading.Lock()
-_active_call_kind = None
+from inference_cancellation import InferenceCancellation
+
+_call_cancellation = InferenceCancellation()
 _active_call_done = threading.Event()
 _active_call_done.set()
-_active_call_cancelled = threading.Event()
+_active_call_cancelled = _call_cancellation.cancelled
 
 # 视觉推理期间允许后续请求等待同一 RKLLM 句柄，避免短暂 503 触发上层重试风暴。
 # 取消请求只负责设置取消标记；真正释放句柄必须等待当前 C 调用返回。
@@ -138,19 +139,16 @@ def _has_waiting_request():
         return _waiting_requests > 0
 
 
-def _begin_call(kind):
-    global _active_call_kind
-    with _active_call_lock:
-        _active_call_kind = kind
-        _active_call_cancelled.clear()
-        _active_call_done.clear()
+def _begin_call(kind, conversation_id=None):
+    if not _call_cancellation.start(kind, conversation_id):
+        return False
+    _active_call_done.clear()
+    return True
 
 
 def _finish_call():
-    global _active_call_kind
-    with _active_call_lock:
-        _active_call_kind = None
-        _active_call_done.set()
+    _call_cancellation.finish()
+    _active_call_done.set()
 
 
 def _is_call_cancelled():
@@ -1052,11 +1050,14 @@ if __name__ == "__main__":
         if not _model_ready.is_set():
             return jsonify({"status": "not_ready", "aborted": False}), 503
 
-        with _active_call_lock:
-            task_kind = _active_call_kind
-            if task_kind is None:
-                return jsonify({"status": "idle", "aborted": False}), 200
-            _active_call_cancelled.set()
+        data = request.get_json(silent=True) or {}
+        conversation_id = str(data.get("conversation_id") or "").strip()
+        close_session = data.get("close_session") is True
+        if close_session and not conversation_id:
+            return jsonify({"status": "invalid_conversation", "aborted": False}), 400
+        task_kind = _call_cancellation.cancel(conversation_id, close_session)
+        if task_kind is None:
+            return jsonify({"status": "idle", "aborted": False}), 200
 
         # 当前板端 runtime 在同步 rkllm_run 期间跨线程调用 rkllm_abort 后，
         # 下一次调用会先耗时十余秒再返回 -1，随后还需一次慢推理才能恢复。
@@ -1330,13 +1331,13 @@ if __name__ == "__main__":
             _release_text_priority(priority_lease)
             return jsonify({'status': 'error', 'message': 'RKLLM_Server is busy! Maybe you can try again later.'}), 503
         lock_wait_ms = (time.monotonic() - request_received_at) * 1000
-        _begin_call("chat")
-
         streaming_started = False
         try:
             data = request.json
             if not data or 'messages' not in data:
                 return jsonify({'status': 'error', 'message': 'Invalid JSON data!'}), 400
+            if not _begin_call("chat", str(data.get("conversation_id") or "").strip()):
+                return jsonify({'status': 'closed', 'message': 'Conversation is closed'}), 409
 
             # Reset global variables.
             drain_queue(global_text)

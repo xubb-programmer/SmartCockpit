@@ -116,7 +116,11 @@ class LLMProvider(LLMProviderBase):
                 _time.sleep(retry_delay)
         return resp
 
-    def abort(self):
+    def close_session(self, session_id):
+        """Cancel only this closed connection, including its queued model request."""
+        return self.abort(conversation_id=session_id, close_session=True)
+
+    def abort(self, conversation_id=None, close_session=False):
         """请求 RKLLM Server 取消当前推理，供语音打断和新指令抢占使用。"""
         base_url = self.base_url.rstrip("/")
         if base_url.endswith("/rkllm_chat"):
@@ -126,7 +130,8 @@ class LLMProvider(LLMProviderBase):
         try:
             response = requests.post(
                 abort_url,
-                json={},
+                json=({"conversation_id": conversation_id, "close_session": close_session}
+                      if conversation_id else {}),
                 timeout=2,
                 verify=self.verify_ssl,
                 headers={"Content-Type": "application/json"},

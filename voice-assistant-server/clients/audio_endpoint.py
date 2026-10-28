@@ -41,8 +41,19 @@ class SpeechEndpoint:
         return float(np.percentile(self.noise_samples, 20))
 
     def observe_noise(self, rms: float) -> None:
-        if rms > 0.0:
+        # 仅用低于起音门限的帧更新背景，不能把人声/唤醒词当成噪声。
+        # 数字静音也要参与更新，否则旧基线在静音后永远无法恢复。
+        high, _ = self.thresholds()
+        if 0.0 <= rms < high:
             self.noise_samples.append(rms)
+
+    def onset_pending(self, now: float, deadline: float, chunk_seconds: float) -> bool:
+        """Only an onset observed before the deadline gets bounded confirmation time."""
+        return (
+            self.voice_candidate_at is not None
+            and self.voice_candidate_at < deadline
+            and now <= self.voice_candidate_at + self.speech_start_hold_seconds + chunk_seconds
+        )
 
     def observe_pcm(self, pcm: bytes) -> float:
         rms = self.pcm_rms(pcm)

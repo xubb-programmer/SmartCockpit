@@ -252,6 +252,78 @@ class HeadlessClientTests(unittest.IsolatedAsyncioTestCase):
         await self.client._finish_listening("test")
         self.assertEqual(self.client.state, STATE_WAIT_WAKE)
 
+    async def test_followup_onset_before_deadline_can_finish_confirmation(self):
+        await self.followup()
+        self.client._followup_started_at = 100
+        speech = b"\xff\x0f" * 640
+        with patch("clients.headless_voice_client.time", types.SimpleNamespace(monotonic=lambda: 107.97)):
+            await self.client._stream_followup_audio(speech)
+        with patch("clients.headless_voice_client.time", types.SimpleNamespace(monotonic=lambda: 108.02)):
+            await self.client._check_state_timeout()
+            self.assertEqual(self.client.state, STATE_FOLLOWUP)
+            await self.client._stream_followup_audio(speech)
+        self.assertEqual(self.client.state, STATE_LISTENING)
+        self.client._acquire_turn.assert_awaited_once()
+
+    async def test_followup_new_onset_after_deadline_is_rejected(self):
+        await self.followup()
+        self.client._followup_started_at = 100
+        with patch("clients.headless_voice_client.time", types.SimpleNamespace(monotonic=lambda: 108.02)):
+            await self.client._stream_followup_audio(b"\xff\x0f" * 640)
+        self.assertEqual(self.client.state, STATE_WAIT_WAKE)
+        self.client._acquire_turn.assert_not_awaited()
+
+    async def test_stale_onset_cannot_extend_window_indefinitely(self):
+        await self.followup()
+        self.client._followup_started_at = 100
+        self.client.speech_endpoint.voice_candidate_at = 107.97
+        with patch("clients.headless_voice_client.time", types.SimpleNamespace(monotonic=lambda: 108.2)):
+            await self.client._check_state_timeout()
+        self.assertEqual(self.client.state, STATE_WAIT_WAKE)
+
+    async def test_initial_window_allows_pending_onset_confirmation(self):
+        await self.wake()
+        self.client._listen_started_at = 100
+        self.client.speech_endpoint.voice_candidate_at = 107.97
+        with patch("clients.headless_voice_client.time", types.SimpleNamespace(monotonic=lambda: 108.02)):
+            await self.client._check_state_timeout()
+        self.assertEqual(self.client.state, STATE_LISTENING)
+
+    async def test_failed_audio_upload_signals_error(self):
+        await self.wake()
+        self.client.playback.play_cue.reset_mock()
+        self.client.websocket.send.side_effect = ConnectionError("offline")
+        self.assertFalse(await self.client._encode_and_send(b"\0" * self.client.frame_bytes))
+        self.assertEqual(self.client.state, STATE_WAIT_WAKE)
+        self.client.playback.play_cue.assert_called_once_with("error")
+
+    async def test_goodbye_socket_close_finishes_sleep_cue_once(self):
+        client = self.client
+        client.state = STATE_PROCESSING
+        client.reply_echo_tail = 0.05
+        websocket = client.websocket
+        async def incoming():
+            yield '{"type":"stt","text":"再见"}'
+            yield '{"type":"tts","state":"stop"}'
+        socket = MagicMock()
+        socket.send = websocket.send
+        socket.__aiter__ = lambda _: incoming()
+        context = MagicMock()
+        context.__aenter__ = AsyncMock(return_value=socket)
+        context.__aexit__ = AsyncMock(return_value=False)
+        with patch.dict("sys.modules", {"websockets": types.SimpleNamespace(connect=lambda *a, **k: context)}):
+            running = asyncio.create_task(client._connection_loop())
+            try:
+                async def finished():
+                    while client.state != STATE_WAIT_WAKE:
+                        await asyncio.sleep(0.01)
+                await asyncio.wait_for(finished(), 2)
+                client.playback.play_cue.assert_called_once_with("sleep")
+            finally:
+                client.stopping.set()
+                running.cancel()
+                await asyncio.gather(running, return_exceptions=True)
+
 
 if __name__ == "__main__":
     unittest.main()

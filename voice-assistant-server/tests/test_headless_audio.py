@@ -122,6 +122,31 @@ class HeadlessAudioDeviceTests(unittest.TestCase):
 
 
 class HeadlessSpeechEndpointTests(unittest.TestCase):
+    def test_loud_pre_wake_speech_does_not_hide_quiet_command(self):
+        endpoint = SpeechEndpoint(speech_min_seconds=0.35, speech_end_seconds=0.5)
+        for amplitude in [30] * 80 + [1000] * 80:
+            endpoint.observe_pcm(amplitude.to_bytes(2, "little", signed=True) * 640)
+        endpoint.reset_command()
+        for index in range(14):
+            endpoint.process_pcm((655).to_bytes(2, "little", signed=True) * 640,
+                                 10 + index * 0.04, 10)
+        self.assertTrue(endpoint.heard_voice)
+        self.assertLess(endpoint.thresholds()[0], 0.02)
+
+    def test_digital_silence_replaces_stale_noise_baseline(self):
+        endpoint = SpeechEndpoint()
+        endpoint.noise_samples.extend([0.03] * 80)
+        for _ in range(80):
+            endpoint.observe_pcm(b"\0" * 1280)
+        self.assertEqual(endpoint.noise_floor, 0)
+        self.assertEqual(endpoint.thresholds()[0], 0.006)
+
+    def test_background_below_onset_can_still_adapt(self):
+        endpoint = SpeechEndpoint()
+        for _ in range(80):
+            endpoint.observe_noise(0.004)
+        self.assertAlmostEqual(endpoint.thresholds()[0], 0.008)
+
     def test_zero_hold_accepts_first_chunk_including_clock_origin(self):
         endpoint = SpeechEndpoint(speech_start_hold_seconds=0)
         endpoint.process_pcm(b"\x00\x10" * 640, 0.0, 0.0)

@@ -3,6 +3,7 @@ import json
 import sys
 import types
 import unittest
+from unittest.mock import MagicMock, patch
 from pathlib import Path
 
 
@@ -47,6 +48,17 @@ rkllm = load_rkllm_module()
 class ToolCallExtractionTests(unittest.TestCase):
     def setUp(self):
         self.provider = object.__new__(rkllm.LLMProvider)
+
+    def test_connection_close_sends_scoped_cancellation(self):
+        self.provider.base_url = "http://127.0.0.1:18080/rkllm_chat"
+        self.provider.verify_ssl = False
+        response = MagicMock(status_code=200)
+        with patch.object(rkllm.requests, "post", return_value=response, create=True) as post:
+            self.assertTrue(self.provider.close_session("closed-session"))
+        self.assertEqual(post.call_args.args[0], "http://127.0.0.1:18080/rkllm_abort")
+        self.assertEqual(post.call_args.kwargs["json"], {
+            "conversation_id": "closed-session", "close_session": True,
+        })
 
     def test_finalize_preserves_multiple_tagged_calls_in_order(self):
         first = '{"name":"vehicle_control","arguments":{"target":"tracker","action":"track_on"}}'

@@ -927,6 +927,8 @@ class ConnectionHandler:
         self.dialogue.update_system_message(self.prompt)
 
     def chat(self, query, depth=0):
+        if self.stop_event.is_set():
+            return False
         # depth==0 时使用锁序列化，防止多个顶层 chat 并发修改共享状态
         if depth == 0:
             # 非阻塞尝试获取锁；如果获取失败说明有正在运行的 chat，
@@ -936,6 +938,8 @@ class ConnectionHandler:
                 self.logger.bind(tag=TAG).warning("chat() 锁获取超时，跳过本次调用")
                 return False
         try:
+            if self.stop_event.is_set():
+                return False
             return self._chat_inner(query, depth)
         finally:
             if depth == 0:
@@ -1083,6 +1087,8 @@ class ConnectionHandler:
                 f"[TIMING] memory.query_memory: {(time.monotonic()-_t3)*1000:.0f}ms")
 
             _t4 = time.monotonic()
+            if self.stop_event.is_set():
+                return False
             if self.intent_type == "function_call" and functions is not None:
                 # 使用支持functions的streaming接口
                 llm_responses = self.llm.response_with_functions(
@@ -1118,7 +1124,7 @@ class ConnectionHandler:
         llm_output_chars = 0
         try:
             for response in llm_responses:
-                if self.client_abort:
+                if self.client_abort or self.stop_event.is_set():
                     break
                 if llm_first_result_at is None:
                     llm_first_result_at = time.monotonic()
@@ -1192,6 +1198,8 @@ class ConnectionHandler:
                 )
             return
         finally:
+            if callable(getattr(llm_responses, "close", None)):
+                llm_responses.close()
             llm_total_ms = (time.monotonic() - _t_chat_start) * 1000
             first_ms = (
                 (llm_first_result_at - _t_chat_start) * 1000
@@ -1201,6 +1209,8 @@ class ConnectionHandler:
                 f"[性能][LLM] 首结果={first_ms:.0f}毫秒，总耗时={llm_total_ms:.0f}毫秒，"
                 f"输出字符={llm_output_chars}，工具调用={tool_call_flag}"
             )
+        if self.client_abort or self.stop_event.is_set():
+            return False
         # 处理function call
         if tool_call_flag:
             bHasError = False
@@ -1550,7 +1560,18 @@ class ConnectionHandler:
         if self._close_started:
             return
         self._close_started = True
+        self.client_abort = True
+        self.stop_event.set()
         try:
+            # Scoped cancellation must finish before releasing the turn. Never use
+            # a global abort here: a delayed close may belong to an older session.
+            async with self._abort_lock:
+                close_session = getattr(self.llm, "close_session", None)
+                if callable(close_session):
+                    try:
+                        await asyncio.to_thread(close_session, self.session_id)
+                    except Exception as exc:
+                        self.logger.bind(tag=TAG).warning(f"取消会话推理失败: {exc}")
             await self.release_interaction_turn("connection_close")
             # 清理 VAD 连接资源
             if (
