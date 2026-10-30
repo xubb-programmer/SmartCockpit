@@ -1,0 +1,24 @@
+{
+  "release_version": "v1.5.3",
+  "source_commit": "0646ba78ccac712d8e8c03d40dbd1c9619a80afb",
+  "client_date": "2026-10-30",
+  "environment": "RK3588 Python 3.10.20, candidate source identical to committed runtime source",
+  "command": "VOICE_ASSISTANT_HEADLESS_STATUS_FILE=<isolated test path> python -m unittest discover -s tests",
+  "regression_tests": 186,
+  "failures": 0,
+  "errors": 0,
+  "seconds": 9.49,
+  "log_sha256": "9463935ce0027876afd74db043b8cf40a3f7b066fc47616e5e4b9f2757905a02",
+  "source_files_matching_board": 407,
+  "coverage": [
+    "startup normal/failure/recovery announcements",
+    "separate vehicle status notifications",
+    "service responses and initialization readiness",
+    "headless heartbeat and silent PCM",
+    "existing wakeup, music interruption and access protocol regressions"
+  ],
+  "reboot_tested": false,
+  "physical_microphone_and_speaker_acceptance_this_release": false,
+  "vehicle_control_commands_sent": false,
+  "system_volume_logic_in_project": false
+}

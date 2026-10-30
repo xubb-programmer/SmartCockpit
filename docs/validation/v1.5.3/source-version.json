@@ -1,0 +1,18 @@
+{
+  "release_version": "v1.5.3",
+  "format_version": 1,
+  "source_commit": "0646ba78ccac712d8e8c03d40dbd1c9619a80afb",
+  "release_date": "2026-10-30",
+  "release_scope": "source-only",
+  "base_offline_package_version": "v1.5.2",
+  "source_files": 407,
+  "runtime_file_counts": {
+    "rknn-server": 33,
+    "voice-assistant-server": 374
+  },
+  "source_manifest_sha256": "05f23263b6abfc475ecdf2c7e28db84f62a8c64e8e63f207cc6c1944fb9caa66",
+  "site_configuration_snapshots": {
+    "voice-assistant-server/data/.config.yaml": "85f8995a43ee4c608781e7efbadf6aab1e95277eaca40c3073e9d97d968b51d2"
+  },
+  "configuration_policy": "Preserve site configuration; output volume is managed by the board OS, outside project source."
+}

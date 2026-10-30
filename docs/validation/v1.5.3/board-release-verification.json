@@ -1,0 +1,38 @@
+{
+  "release_version": "v1.5.3",
+  "source_commit": "0646ba78ccac712d8e8c03d40dbd1c9619a80afb",
+  "client_date": "2026-10-30",
+  "board": "cat@192.168.0.201",
+  "source_files_verified": 407,
+  "source_manifest_sha256": "05f23263b6abfc475ecdf2c7e28db84f62a8c64e8e63f207cc6c1944fb9caa66",
+  "source_version_sha256": "3babe44366f2503672ec9b3f8a72e3749a8392dd001c9b25787a34d80c44bb77",
+  "source_matches_committed_files": true,
+  "core_health": "ready",
+  "access_mode": "hybrid",
+  "vehicle_failures": [
+    "车辆控制服务入口不可达: 9000 端口未监听"
+  ],
+  "vehicle_services_unchanged": true,
+  "vehicle_services": "MainPID=1048\nExecMainStartTimestampMonotonic=6162002\nId=scout-monitor-1501.service\nActiveState=active\n\nMainPID=0\nExecMainStartTimestampMonotonic=0\nId=zmq.service\nActiveState=inactive\n",
+  "site_configuration_unchanged": true,
+  "configuration_hashes": {
+    "/opt/jw/voice-assistant-server/data/.config.yaml": "85f8995a43ee4c608781e7efbadf6aab1e95277eaca40c3073e9d97d968b51d2",
+    "/etc/systemd/system/voice-assistant.service": "9d2e8428c7675f6704399382b02764556dd1956d740e0536fe5a2392a73d39b7",
+    "/etc/systemd/system/scout-monitor-1501.service": "170c2029c188d860e069f06b6de62fa127e66b5dedbec8c1d0e3cfaf5e0afba5"
+  },
+  "model_pid_preserved": 3129,
+  "voice_pid": 138310,
+  "headless_pid": 311960,
+  "startup_audio_sha256": {
+    "startup-error.wav": "188bb2c2832e9cbb42dfc66f6909eac1b6269f50e19fd63a005a253d41415b04",
+    "startup-ok.wav": "048e64f3f860f0a540d69f6cda3c0afde449ec44c18dc6227fe6d021e3ed37db",
+    "startup-recovered.wav": "1603b6fe478dcee9a0426c5e4f0257efbf82eadf6b0e5f0416efff37954d76c2",
+    "vehicle-control-recovered.wav": "c75bb98a00ec5b029c2056e78c71faa41433b96b270ca4de4d65cf117dc3cc5c",
+    "vehicle-control-unavailable.wav": "753efe6ff8a3718e814ee7263e52f1b9be4db55dd7fc3ba981545e454ae7279b"
+  },
+  "system_volume_managed_outside_project": true,
+  "system_volume_startup_enabled": true,
+  "reboot_tested": false,
+  "offline_package_version": "v1.5.2",
+  "offline_package_rebuilt": false
+}
