@@ -32,6 +32,9 @@ class SimpleHttpServer:
         else:
             return f"ws://{local_ip}:{port}/voice_assistant/v1/"
 
+    async def handle_health(self, _request):
+        return web.json_response({"status": "ok"})
+
     async def start(self):
         try:
             server_config = self.config["server"]
@@ -41,6 +44,10 @@ class SimpleHttpServer:
 
             if port:
                 app = web.Application()
+                app.router.add_get(
+                    "/voice_assistant/health",
+                    self.handle_health,
+                )
 
                 if not read_config_from_api:
                     # 如果没有开启智控台，只是单模块运行，就需要再添加简单OTA接口，用于下发websocket接口

@@ -7,7 +7,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 AUDIO_DIR="${PROJECT_DIR}/assets/startup-audio"
 WEB_URL="${VOICE_ASSISTANT_WEB_URL:-https://127.0.0.1:18007/?v=0903a}"
-WAIT_SECONDS="${VOICE_ASSISTANT_STARTUP_TIMEOUT:-90}"
+WAIT_SECONDS="${VOICE_ASSISTANT_STARTUP_TIMEOUT:-240}"
 POLL_SECONDS="${VOICE_ASSISTANT_STARTUP_POLL_INTERVAL:-2}"
 RECOVERY_SECONDS="${VOICE_ASSISTANT_RECOVERY_POLL_INTERVAL:-5}"
 PREFER_INTERNAL_AUDIO="${VOICE_ASSISTANT_PREFER_INTERNAL_AUDIO:-1}"
@@ -19,37 +19,25 @@ CERT_FILE="${VOICE_ASSISTANT_CERT_FILE:-/opt/jw/.ssl/cert.pem}"
 RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp}"
 LOCK_FILE="${RUNTIME_DIR}/voice-assistant-startup-notifier.lock"
 VEHICLE_LOCK_FILE="${RUNTIME_DIR}/voice-assistant-vehicle-recovery.lock"
+AUDIO_PLAYBACK_LOCK_FILE="${RUNTIME_DIR}/voice-assistant-announcement.lock"
 AUDIO_LOCK_FILE="${RUNTIME_DIR}/voice-assistant-audio-route.lock"
 STATUS_FILE="${RUNTIME_DIR}/voice-assistant-startup-status"
 ACCESS_MODE_FILE="/tmp/voice_assistant_access_mode"
 
 MODE="${1:---autostart}"
 
-CORE_KEYS=(rkllm websocket voice_http web_http https_gateway)
-declare -A PORTS=(
-    [rkllm]=18080
-    [websocket]=18000
-    [voice_http]=18003
-    [web_http]=18006
-    [https_gateway]=18007
-    [vehicle_control]=9000
-)
 declare -A NAMES=(
     [rkllm]="大模型服务"
-    [websocket]="语音连接服务"
-    [voice_http]="语音接口服务"
-    [web_http]="网页服务"
-    [https_gateway]="网页安全服务"
+    [voice]="语音服务"
+    [web]="网页访问"
+    [headless]="唤醒服务"
     [vehicle_control]="车辆控制服务"
+    [startup_check]="启动自检"
 )
-declare -A AUDIO_FILES=(
-    [rkllm]="rkllm-unavailable.wav"
-    [websocket]="voice-websocket-unavailable.wav"
-    [voice_http]="voice-http-unavailable.wav"
-    [web_http]="web-http-unavailable.wav"
-    [https_gateway]="https-gateway-unavailable.wav"
-    [vehicle_control]="vehicle-control-unavailable.wav"
-)
+declare -A FAILURE_REASONS=()
+LAST_FAILURE_DETAILS=""
+VEHICLE_DIAGNOSTIC=""
+LAST_VEHICLE_DIAGNOSTIC=""
 
 log_info() {
     printf '[INFO ] %s\n' "$*"
@@ -81,38 +69,62 @@ show_help() {
 EOF
 }
 
-port_ready() {
-    local port="$1"
-    ss -H -ltn 2>/dev/null | grep -Eq ":${port}[[:space:]]"
-}
-
 vehicle_check_enabled() {
     systemctl is-enabled --quiet scout-monitor-1501.service 2>/dev/null
 }
 
 collect_core_missing() {
-    local key
+    local key reason result
+    local -a args=()
     CORE_MISSING=()
-    for key in "${CORE_KEYS[@]}"; do
-        if ! port_ready "${PORTS[${key}]}"; then
-            CORE_MISSING+=("${key}")
-        fi
-    done
+    FAILURE_REASONS=()
+    VEHICLE_DIAGNOSTIC=""
+    vehicle_check_enabled && args+=(--vehicle-enabled)
+    if ! result="$(python3 "${SCRIPT_DIR}/startup_health.py" --mode "$(access_mode)" "${args[@]}")"; then
+        CORE_MISSING=(startup_check)
+        FAILURE_REASONS[startup_check]="健康检查程序执行失败"
+        return
+    fi
+    while IFS=$'\t' read -r key reason; do
+        [[ -n "${key}" ]] || continue
+        case "${key}" in
+            vehicle_control) VEHICLE_DIAGNOSTIC="${reason}"; continue ;;
+            rkllm|voice|web|headless) ;;
+            *) key=startup_check; reason="健康检查返回未知状态" ;;
+        esac
+        CORE_MISSING+=("${key}")
+        FAILURE_REASONS[${key}]="${reason}"
+    done <<<"${result}"
 }
 
-vehicle_missing() {
-    vehicle_check_enabled && ! port_ready "${PORTS[vehicle_control]}"
+access_mode() {
+    local mode="${VOICE_ACCESS_MODE:-}"
+    [[ -n "${mode}" ]] || mode="$(cat "${ACCESS_MODE_FILE}" 2>/dev/null || echo web)"
+    case "${mode}" in web|wakeup|hybrid) printf '%s\n' "${mode}" ;; *) echo web ;; esac
 }
 
-missing_names() {
+failure_details() {
     local key output=""
-    for key in "$@"; do
-        if [[ -n "${output}" ]]; then
-            output+="、"
-        fi
-        output+="${NAMES[${key}]}"
+    for key in "${CORE_MISSING[@]}"; do
+        [[ -z "${output}" ]] || output+="；"
+        output+="${NAMES[${key}]}: ${FAILURE_REASONS[${key}]}"
     done
     printf '%s' "${output}"
+}
+
+log_health_changes() {
+    local details
+    details="$(failure_details)"
+    if [[ "${details}" != "${LAST_FAILURE_DETAILS}" ]]; then
+        if [[ -n "${details}" ]]; then log_warn "启动自检未通过: ${details}"; fi
+        LAST_FAILURE_DETAILS="${details}"
+    fi
+    if [[ "${VEHICLE_DIAGNOSTIC}" != "${LAST_VEHICLE_DIAGNOSTIC}" ]]; then
+        if [[ -n "${VEHICLE_DIAGNOSTIC}" ]]; then
+            log_warn "车辆控制独立状态: ${VEHICLE_DIAGNOSTIC}"
+        fi
+        LAST_VEHICLE_DIAGNOSTIC="${VEHICLE_DIAGNOSTIC}"
+    fi
 }
 
 write_status() {
@@ -265,7 +277,9 @@ start_audio_route_monitor() {
     ) >/dev/null 2>&1 &
 }
 
-play_audio_file() {
+play_audio_file() (
+    exec 6>"${AUDIO_PLAYBACK_LOCK_FILE}"
+    flock -w 40 6 || return 1
     local file="$1"
     local path="${AUDIO_DIR}/${file}"
     local pulse_sink=""
@@ -304,15 +318,7 @@ play_audio_file() {
 
     log_warn "无法播放提示音: ${path}"
     return 1
-}
-
-play_missing_audio() {
-    local key
-    play_audio_file "startup-error.wav" || true
-    for key in "$@"; do
-        play_audio_file "${AUDIO_FILES[${key}]}" || true
-    done
-}
+)
 
 find_chromium_browser() {
     local candidate
@@ -405,81 +411,108 @@ open_browser() {
 }
 
 print_current_status() {
-    local keys=("${CORE_MISSING[@]}")
-    if vehicle_missing; then
-        keys+=(vehicle_control)
+    if [[ -n "${VEHICLE_DIAGNOSTIC}" ]]; then
+        printf '车辆控制独立状态：%s。\n' "${VEHICLE_DIAGNOSTIC}" >&2
     fi
-
-    if (( ${#keys[@]} == 0 )); then
-        printf '语音助手服务已就绪。\n'
+    if (( ${#CORE_MISSING[@]} == 0 )); then
+        printf '语音服务运行正常。\n'
         return 0
     fi
-
-    printf '未就绪：%s。\n' "$(missing_names "${keys[@]}")"
+    printf '语音服务运行异常：%s。\n' "$(failure_details)"
     return 1
+}
+
+core_ready() {
+    local key
+    for key in "${CORE_MISSING[@]}"; do
+        [[ "${key}" == vehicle_control ]] || return 1
+    done
+    return 0
+}
+
+BROWSER_OPENED=0
+open_browser_when_ready() {
+    [[ "$(access_mode)" != wakeup ]] || return 0
+    core_ready || return 0
+    if (( BROWSER_OPENED == 0 )); then
+        if open_browser; then BROWSER_OPENED=1; fi
+    fi
 }
 
 do_manual() {
     collect_core_missing
-    if (( ${#CORE_MISSING[@]} == 0 )); then
+    if core_ready; then
         configure_preferred_output || true
         start_audio_route_monitor
-        open_browser
+        open_browser_when_ready
         return 0
     fi
-
-    local names
-    names="$(missing_names "${CORE_MISSING[@]}")"
-    notify_desktop "语音助手正在启动" "${names}尚未就绪，请稍后重试。"
-    log_warn "桌面打开请求未执行，未就绪: ${names}"
+    notify_desktop "语音服务运行异常" "服务暂不可用，请稍后重试。"
+    log_warn "桌面打开请求未执行: $(failure_details)"
     return 1
 }
 
 announce_ready() {
+    local state="${1:-ready}"
     configure_preferred_output || true
     start_audio_route_monitor
-    if vehicle_missing; then
-        write_status "degraded" "${NAMES[vehicle_control]}未就绪"
-        notify_desktop "语音助手已启动" "语音服务已就绪，但车辆控制服务未连接。"
-        play_audio_file "startup-degraded.wav" || true
-        play_audio_file "${AUDIO_FILES[vehicle_control]}" || true
+    if [[ "${state}" == recovered ]]; then
+        write_status recovered "语音服务已恢复"
+        notify_desktop "语音服务已恢复" "语音服务已恢复。"
+        play_audio_file "startup-recovered.wav" || true
     else
-        write_status "ready" "所有服务运行正常"
-        notify_desktop "语音助手已启动" "所有服务运行正常。"
+        write_status ready "语音服务运行正常"
+        notify_desktop "语音服务运行正常" "语音服务运行正常。"
         play_audio_file "startup-ok.wav" || true
     fi
-    if [[ "$(cat "${ACCESS_MODE_FILE}" 2>/dev/null || echo web)" != "wakeup" ]]; then
-        open_browser
-    else
-        log_info "wakeup 模式不自动打开浏览器"
-    fi
+    open_browser_when_ready
+}
+
+vehicle_port_ready() {
+    ss -H -ltn 2>/dev/null | grep -Eq ':9000[[:space:]]'
 }
 
 start_vehicle_recovery_monitor() {
-    vehicle_missing || return 0
+    vehicle_check_enabled || return 0
     (
         exec 9>&-
         exec 8>"${VEHICLE_LOCK_FILE}"
         flock -n 8 || exit 0
-        log_warn "车辆控制服务未就绪，仅继续观察状态，不执行重启或修改"
-        while vehicle_missing; do
+        local status_file="${RUNTIME_DIR}/voice-assistant-vehicle-status"
+        local healthy_samples=0
+        if vehicle_port_ready; then
+            printf 'state=ready\n' > "${status_file}"
+            return 0
+        fi
+        printf 'state=failed\ndetail=车辆控制服务入口未监听\n' > "${status_file}"
+        log_warn "车辆控制服务未连接；仅观察恢复，不重启或修改服务"
+        notify_desktop "车辆控制服务未连接" "语音服务状态独立检查。"
+        play_audio_file "vehicle-control-unavailable.wav" || true
+        while (( healthy_samples < 2 )); do
             sleep "${RECOVERY_SECONDS}"
+            if vehicle_port_ready; then
+                healthy_samples=$((healthy_samples + 1))
+            else
+                healthy_samples=0
+            fi
         done
-        write_status "ready" "车辆控制服务已恢复"
-        notify_desktop "车辆控制服务已恢复" "车辆控制功能现在可以使用。"
+        printf 'state=recovered\n' > "${status_file}"
+        log_info "车辆控制服务已恢复"
+        notify_desktop "车辆控制服务已恢复" "车辆控制服务已恢复。"
         play_audio_file "vehicle-control-recovered.wav" || true
-    ) >/dev/null 2>&1 &
+    ) &
 }
 
 do_autostart() {
     local deadline=$((SECONDS + WAIT_SECONDS))
-    local names
+    local healthy_samples=0
 
     write_status "starting" "正在等待语音服务"
     log_info "开始等待语音服务，最长 ${WAIT_SECONDS} 秒"
 
     while true; do
         collect_core_missing
+        log_health_changes
         if (( ${#CORE_MISSING[@]} == 0 )); then
             log_info "语音服务已就绪"
             announce_ready
@@ -498,34 +531,36 @@ do_autostart() {
         sleep "${POLL_SECONDS}"
     done
 
-    local all_missing=("${CORE_MISSING[@]}")
-    if vehicle_missing; then
-        all_missing+=(vehicle_control)
-    fi
-    names="$(missing_names "${all_missing[@]}")"
-    write_status "failed" "${names}未就绪"
-    notify_desktop "语音助手启动异常" "${names}未就绪，系统将继续等待恢复。"
+    write_status failed "$(failure_details)"
+    notify_desktop "语音服务运行异常" "系统正在等待服务恢复。"
     configure_preferred_output || true
-    play_missing_audio "${all_missing[@]}"
+    start_audio_route_monitor
+    play_audio_file "startup-error.wav" || true
+    start_vehicle_recovery_monitor
+    open_browser_when_ready
 
     while true; do
         sleep "${RECOVERY_SECONDS}"
         collect_core_missing
+        log_health_changes
         if (( ${#CORE_MISSING[@]} == 0 )); then
-            log_info "故障服务已恢复"
-            write_status "recovered" "语音服务已恢复"
-            notify_desktop "语音助手已恢复" "语音服务可以正常使用。"
-            play_audio_file "startup-recovered.wav" || true
-            if [[ "$(cat "${ACCESS_MODE_FILE}" 2>/dev/null || echo web)" != "wakeup" ]]; then
-                open_browser
-            else
-                log_info "wakeup 模式不自动打开浏览器"
+            healthy_samples=$((healthy_samples + 1))
+            # Two successful observations avoid a short port/connection flap.
+            if (( healthy_samples >= 2 )); then
+                log_info "故障服务已恢复"
+                announce_ready recovered
+                return 0
             fi
-            start_vehicle_recovery_monitor
-            return 0
+        else
+            healthy_samples=0
+            write_status failed "$(failure_details)"
+            open_browser_when_ready
         fi
     done
 }
+
+# Allow the functions to be exercised without starting desktop/audio processes.
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then return 0; fi
 
 case "${MODE}" in
     --autostart|--manual|--check)

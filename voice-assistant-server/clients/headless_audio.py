@@ -224,6 +224,7 @@ class PcmCapture:
         self._stopping = threading.Event()
         self.error: Optional[str] = None
         self.dropped_chunks = 0
+        self.last_chunk_at = 0.0
 
     def start(self) -> None:
         if self._process and self._process.poll() is None:
@@ -258,6 +259,7 @@ class PcmCapture:
             ]
         self._stopping.clear()
         self.error = None
+        self.last_chunk_at = 0.0
         self._process = subprocess.Popen(
             command,
             env=pulse_environment() if self.backend == "pulse" else None,
@@ -282,6 +284,7 @@ class PcmCapture:
                 while len(pending) >= self.chunk_bytes:
                     chunk = bytes(pending[: self.chunk_bytes])
                     del pending[: self.chunk_bytes]
+                    self.last_chunk_at = time.monotonic()
                     try:
                         self._queue.put_nowait(chunk)
                     except queue.Full:

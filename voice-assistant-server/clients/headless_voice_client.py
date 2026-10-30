@@ -26,6 +26,7 @@ from clients.headless_audio import (
 )
 from clients.headless_kws import SherpaKeywordDetector
 from clients.headless_vad import PcmSpeechDetector
+from clients.headless_status import HeadlessStatus
 from core.auth import AuthManager
 from core.interaction_access import get_access_config, get_access_mode
 
@@ -262,6 +263,7 @@ class HeadlessVoiceClient:
         self.state = STATE_WAIT_WAKE
         self.websocket = None
         self.connected = asyncio.Event()
+        self._server_ready = False
         self.stopping = asyncio.Event()
         self._send_lock = asyncio.Lock()
         self._access_future = None
@@ -280,6 +282,7 @@ class HeadlessVoiceClient:
         self._wake_detected_at = 0.0
         self._exit_requested = False
         self._preroll = deque(maxlen=max(2, 320 // self.capture_chunk_ms))
+        self._runtime_status = HeadlessStatus()
 
         log("INFO", f"语音入口模式: {self.mode}")
         log("INFO", f"音频后端: {self.audio_backend}")
@@ -291,20 +294,42 @@ class HeadlessVoiceClient:
         log("INFO", f"首次等待说话={self.initial_listen_timeout:g}秒，回复后续说窗口={self.followup_timeout:g}秒")
 
     async def run(self) -> None:
-        if not await self._start_capture_with_retry(self.audio_start_timeout):
-            raise RuntimeError(self.capture.error or "麦克风采集启动失败")
-
-        connection_task = asyncio.create_task(self._connection_loop())
-        audio_task = asyncio.create_task(self._audio_loop())
+        tasks = [asyncio.create_task(self._status_loop())]
         try:
+            if not await self._start_capture_with_retry(self.audio_start_timeout):
+                raise RuntimeError(self.capture.error or "麦克风采集启动失败")
+            tasks.extend([
+                asyncio.create_task(self._connection_loop()),
+                asyncio.create_task(self._audio_loop()),
+            ])
             await self.stopping.wait()
         finally:
             self._invalidate_turn()
-            for task in (connection_task, audio_task):
+            for task in tasks:
                 task.cancel()
-            await asyncio.gather(connection_task, audio_task, return_exceptions=True)
+            await asyncio.gather(*tasks, return_exceptions=True)
             self.capture.stop()
             self.playback.close()
+            self._runtime_status.clear()
+
+    async def _status_loop(self) -> None:
+        warned = False
+        last_probe_at = 0.0
+        while not self.stopping.is_set():
+            now = time.monotonic()
+            if self.connected.is_set() and not self._server_ready and now - last_probe_at >= 2:
+                await self._send_json({"type": "access", "action": "health"})
+                last_probe_at = now
+            try:
+                self._runtime_status.publish(
+                    self.capture, self.connected.is_set(), self.state, self._server_ready,
+                )
+                warned = False
+            except OSError as exc:
+                if not warned:
+                    log("WARN", f"无法更新唤醒客户端状态: {exc}")
+                    warned = True
+            await asyncio.sleep(1)
 
     async def _start_capture_with_retry(self, timeout: float) -> bool:
         wait_forever = self.audio_backend == "pulse" and timeout <= 0
@@ -381,6 +406,7 @@ class HeadlessVoiceClient:
                     STATE_LISTENING, STATE_PROCESSING, STATE_PLAYING,
                 } and not self._exit_requested
                 self.connected.clear()
+                self._server_ready = False
                 self.websocket = None
                 self._invalidate_turn()
                 if self._access_future and not self._access_future.done():
@@ -477,11 +503,15 @@ class HeadlessVoiceClient:
                 self.playback.sample_rate = server_rate
                 self._decoder = None
             self.connected.set()
+            self._server_ready = False
             log("INFO", f"语音服务连接成功，输出采样率={self.output_sample_rate}Hz")
             return
 
         if message_type == "access":
             status = str(payload.get("status", "unknown"))
+            if status == "health":
+                self._server_ready = payload.get("ready") is True
+                return
             if status in {"granted", "busy", "denied", "initializing"} and self._access_future and not self._access_future.done():
                 self._access_future.set_result(status)
             if status == "denied":

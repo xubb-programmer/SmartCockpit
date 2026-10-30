@@ -1,4 +1,5 @@
 from typing import Any, Dict, TYPE_CHECKING
+import json
 
 if TYPE_CHECKING:
     from core.connection import ConnectionHandler
@@ -18,6 +19,18 @@ class AccessTextMessageHandler(TextMessageHandler):
         self, conn: "ConnectionHandler", msg_json: Dict[str, Any]
     ) -> None:
         action = str(msg_json.get("action", "status")).strip().lower()
+
+        if action == "health":
+            # Inspect initialization without acquiring or releasing a voice turn.
+            ready = (
+                conn.components_ready_event.is_set()
+                and not conn.components_init_error
+                and conn.tts is not None and conn.asr is not None
+            )
+            await conn.websocket.send(json.dumps({
+                "type": "access", "status": "health", "ready": bool(ready),
+            }))
+            return
 
         if action == "acquire":
             if not await conn.wait_until_components_ready(timeout=3):

@@ -12,16 +12,10 @@ import yaml
 
 
 PROMPTS = {
-    "startup-ok.wav": "语音助手已启动，所有服务运行正常。",
-    "startup-degraded.wav": "语音助手已启动。",
-    "startup-error.wav": "语音助手启动异常。",
-    "rkllm-unavailable.wav": "大模型服务未就绪。",
-    "voice-websocket-unavailable.wav": "语音连接服务未就绪。",
-    "voice-http-unavailable.wav": "语音接口服务未就绪。",
-    "web-http-unavailable.wav": "网页服务未就绪。",
-    "https-gateway-unavailable.wav": "网页安全服务未就绪。",
+    "startup-ok.wav": "语音服务运行正常。",
+    "startup-error.wav": "语音服务运行异常。",
+    "startup-recovered.wav": "语音服务已恢复。",
     "vehicle-control-unavailable.wav": "车辆控制服务未连接。",
-    "startup-recovered.wav": "故障服务已恢复，语音助手可以正常使用。",
     "vehicle-control-recovered.wav": "车辆控制服务已恢复。",
 }
 
